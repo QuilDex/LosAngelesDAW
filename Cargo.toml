@@ -1,0 +1,46 @@
+[package]
+name = "losangeles"
+version = "0.1.0"
+edition = "2021"
+description = "LOSANGELES — experimental grid-free DAW for sound design and off-grid groove"
+license = "MIT OR Apache-2.0"
+rust-version = "1.76"
+
+[[bin]]
+name = "LOSANGELES"
+path = "src/main.rs"
+
+[dependencies]
+# --- GUI ---
+eframe = { version = "0.29", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+] }
+egui = "0.29"
+
+# --- Audio engine ---
+cpal = "0.15"
+rtrb = "0.3"
+
+# --- Audio file decoding (used from Stage 2 onwards) ---
+hound = "3.5"
+symphonia = { version = "0.5", features = ["wav", "ogg", "mp3", "flac", "vorbis", "pcm"] }
+
+# --- Utilities ---
+anyhow = "1.0"
+
+# Release: optimized, small, self-contained executable.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+overflow-checks = false
+
+# Keep the dev loop responsive but dependencies optimized (audio needs it).
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
