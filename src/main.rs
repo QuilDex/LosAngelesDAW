@@ -894,7 +894,11 @@ impl LosAngelesApp {
         let mut swap: Option<(usize, usize)> = None;
         let mut drop_pack: Option<usize> = None;
 
+        // Keep the "add pack folder" footer on screen: the list scrolls inside
+        // the space that is left, instead of eating the whole panel.
+        let list_h = (ui.available_height() - 104.0).max(80.0);
         egui::ScrollArea::vertical()
+            .max_height(list_h)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for i in 0..self.packs.len() {
@@ -1021,7 +1025,9 @@ impl LosAngelesApp {
     fn plugins_tab(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         let mut add: Option<PluginEntry> = None;
 
+        let list_h = (ui.available_height() - 104.0).max(80.0);
         egui::ScrollArea::vertical()
+            .max_height(list_h)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.plugins.is_empty() {
