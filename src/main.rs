@@ -8,6 +8,7 @@
 //!   src/decode.rs     — audio decoding + waveform peaks
 //!   src/engine.rs     — cpal stream, mixer, effects, note voices
 //!   src/library.rs    — pack scanning, plugin discovery
+//!   src/mixrack.rs    — mix rack: master + one strip per track, insert slots
 //!   src/tracks.rs     — track model (unlimited), effects, plugin instances
 //!   src/theme.rs      — colour themes
 //!   src/pianoroll.rs  — note editor
@@ -15,6 +16,7 @@
 mod decode;
 mod engine;
 mod library;
+mod mixrack;
 mod pianoroll;
 mod theme;
 mod tracks;
@@ -32,7 +34,7 @@ use engine::{AudioEngine, Command, InputEngine, MixSnapshot, PlacedNote, Shared,
 use library::{default_plugin_dirs, PluginEntry, PluginKind};
 use pianoroll::PianoRoll;
 use theme::{Theme, ThemeName};
-use tracks::{EffectKind, PlacedClip, PluginInst, Track, TRACK_COLORS};
+use tracks::{EffectKind, Master, PlacedClip, PluginInst, Track, TRACK_COLORS};
 
 // Timeline geometry
 const RULER_H: f32 = 26.0;
@@ -50,6 +52,7 @@ enum Bottom {
     Closed,
     Piano,
     Fx,
+    Mix,
 }
 
 #[derive(Clone, Copy)]
@@ -83,6 +86,7 @@ struct LosAngelesApp {
     vscroll: f32, // vertical track scroll in pixels
 
     tracks: Vec<Track>,
+    master: Master,
     selected: usize,
     clips: Vec<PlacedClip>,
 
@@ -143,6 +147,7 @@ impl LosAngelesApp {
             scroll: 0.0,
             vscroll: 0.0,
             tracks,
+            master: Master::default(),
             selected: 0,
             clips: Vec::new(),
             theme_name,
@@ -678,6 +683,13 @@ impl LosAngelesApp {
                         toggle_bottom = Some(Bottom::Fx);
                     }
                     if ui
+                        .selectable_label(self.bottom == Bottom::Mix, "MIX")
+                        .on_hover_text("mix rack: master + every track")
+                        .clicked()
+                    {
+                        toggle_bottom = Some(Bottom::Mix);
+                    }
+                    if ui
                         .selectable_label(self.bottom == Bottom::Piano, "PIANO")
                         .on_hover_text("piano roll for the selected track")
                         .clicked()
@@ -1125,7 +1137,11 @@ impl LosAngelesApp {
 
         egui::TopBottomPanel::bottom("bottom")
             .resizable(true)
-            .default_height(if self.bottom == Bottom::Piano { 240.0 } else { 190.0 })
+            .default_height(match self.bottom {
+                Bottom::Piano => 240.0,
+                Bottom::Mix => 340.0,
+                _ => 190.0,
+            })
             .min_height(120.0)
             .frame(
                 egui::Frame::none()
@@ -1144,6 +1160,7 @@ impl LosAngelesApp {
                     ui.label(
                         egui::RichText::new(match self.bottom {
                             Bottom::Piano => "PIANO ROLL",
+                            Bottom::Mix => "MIX RACK — MASTER + TRACKS",
                             _ => "TRACK FX / PLUGINS",
                         })
                         .size(10.0)
@@ -1160,6 +1177,7 @@ impl LosAngelesApp {
 
                 match self.bottom {
                     Bottom::Piano => self.piano_panel(ui, &theme),
+                    Bottom::Mix => self.mix_rack_panel(ui, &theme),
                     _ => self.fx_panel(ui, &theme),
                 }
             });
@@ -1211,6 +1229,35 @@ impl LosAngelesApp {
         self.roll.show(ui, theme, playhead);
         if self.roll.changed {
             self.tracks[sel].notes = self.roll.notes.clone();
+            self.sync_mix();
+            self.dirty = true;
+        }
+    }
+
+    /// Master + every track in one horizontal rack; insert slots are the hook
+    /// for the plugin runtime that lands next.
+    fn mix_rack_panel(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let out = mixrack::show(
+            ui,
+            theme,
+            &mut self.tracks,
+            self.selected,
+            &mut self.master,
+            self.gain,
+            self.meter,
+            &self.plugins,
+        );
+        if let Some(i) = out.select {
+            self.select_track(i);
+        }
+        if let Some(i) = out.open_fx {
+            self.selected = i;
+            self.bottom = Bottom::Fx;
+        }
+        if let Some(g) = out.gain {
+            self.set_gain(g);
+        }
+        if out.changed {
             self.sync_mix();
             self.dirty = true;
         }

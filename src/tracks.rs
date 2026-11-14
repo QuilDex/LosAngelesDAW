@@ -68,6 +68,31 @@ pub struct PluginInst {
     pub enabled: bool,
 }
 
+/// Insert slots shown per channel in the mix rack (plugin hosting hook).
+pub const INSERT_SLOTS: usize = 4;
+
+/// Master bus: gain lives in the app/engine, everything below is the rack
+/// layout the future plugin + limiter DSP will read.
+#[derive(Clone)]
+pub struct Master {
+    pub effects: Vec<Effect>,
+    pub plugins: Vec<PluginInst>,
+    pub limiter: bool,
+    /// Limiter ceiling in dBFS.
+    pub ceiling_db: f32,
+}
+
+impl Default for Master {
+    fn default() -> Self {
+        Self {
+            effects: Vec::new(),
+            plugins: Vec::new(),
+            limiter: false,
+            ceiling_db: -0.3,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PlacedClip {
     pub data: Arc<ClipData>,
