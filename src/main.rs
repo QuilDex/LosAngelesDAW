@@ -253,7 +253,8 @@ impl LosAngelesApp {
         let any_solo = self.tracks.iter().any(|t| t.solo);
         let mut mix_tracks = Vec::with_capacity(self.tracks.len());
         for t in &self.tracks {
-            let (mut drive, mut lowpass, mut highpass, mut tremolo) = (0.0f32, 0.0, 0.0, 0.0);
+            let (mut drive, mut lowpass, mut highpass, mut tremolo) =
+                (0.0f32, 0.0f32, 0.0f32, 0.0f32);
             for e in t.effects.iter().filter(|e| e.enabled) {
                 match e.kind {
                     EffectKind::Drive => drive = drive.max(e.amount),
@@ -585,12 +586,9 @@ impl LosAngelesApp {
                     ui.add_space(10.0);
                     ui.label(egui::RichText::new("MASTER").size(10.0).color(dim));
                     let mut gain = self.gain;
+                    ui.spacing_mut().slider_width = 92.0;
                     if ui
-                        .add(
-                            egui::Slider::new(&mut gain, 0.0..=1.2)
-                                .show_value(false)
-                                .desired_width(92.0),
-                        )
+                        .add(egui::Slider::new(&mut gain, 0.0..=1.2).show_value(false))
                         .changed()
                     {
                         self.set_gain(gain);
@@ -1150,12 +1148,9 @@ impl LosAngelesApp {
                                 .size(11.0)
                                 .color(theme.accent),
                         );
+                        ui.spacing_mut().slider_width = 130.0;
                         if ui
-                            .add(
-                                egui::Slider::new(&mut fx.amount, 0.0..=1.0)
-                                    .show_value(false)
-                                    .desired_width(130.0),
-                            )
+                            .add(egui::Slider::new(&mut fx.amount, 0.0..=1.0).show_value(false))
                             .changed()
                         {
                             changed = true;
@@ -1187,12 +1182,9 @@ impl LosAngelesApp {
                                 .color(theme.accent_hot),
                         );
                         ui.label(egui::RichText::new(&pl.name).size(11.0).color(theme.cream));
+                        ui.spacing_mut().slider_width = 90.0;
                         if ui
-                            .add(
-                                egui::Slider::new(&mut pl.wet, 0.0..=1.0)
-                                    .show_value(false)
-                                    .desired_width(90.0),
-                            )
+                            .add(egui::Slider::new(&mut pl.wet, 0.0..=1.0).show_value(false))
                             .changed()
                         {
                             changed = true;
@@ -1586,6 +1578,7 @@ impl LosAngelesApp {
         let mut ui = ui.child_ui(
             inner,
             egui::Layout::top_down(egui::Align::Min),
+            None,
         );
         ui.horizontal(|ui| {
             if ui
