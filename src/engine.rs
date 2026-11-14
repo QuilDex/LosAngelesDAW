@@ -51,20 +51,13 @@ pub struct MixSnapshot {
     pub notes: Vec<PlacedNote>,
 }
 
-/// Позиция превью-плейхеда (длится до следующего события).
-#[derive(Clone, Copy, Default)]
-pub struct Preview {
-    pub time: f32,
-}
-
-pub enum Command {
-    Play,
-    Stop,
-    SetGain(f32),
-    SetTone(bool),
-    SetMix(Box<MixSnapshot>),
-    Preview(Option<f32>), // Some(t) = сыграть preview, None = stop preview
-    SetPreview(Box<Preview>), // позиция preview в секундах
+/// A sample being auditioned from the browser. It runs on its own clock,
+/// independent of the transport, so a sound is heard before it is placed.
+#[derive(Clone)]
+pub struct PreviewVoice {
+    pub data: Arc<ClipData>,
+    /// Bumped by the UI for every new preview so the audio thread restarts it.
+    pub serial: u64,
 }
 
 pub enum Command {
