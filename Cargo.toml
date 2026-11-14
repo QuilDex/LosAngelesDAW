@@ -30,6 +30,9 @@ symphonia = { version = "0.5", features = ["wav", "ogg", "mp3", "flac", "vorbis"
 # --- Utilities ---
 anyhow = "1.0"
 
+# --- Native file open dialog (drag & drop is not enough for keyboard users) ---
+rfd = "0.14"
+
 # Release: optimized, small, self-contained executable.
 [profile.release]
 opt-level = 3
