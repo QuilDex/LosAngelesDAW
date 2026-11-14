@@ -25,6 +25,25 @@ fn is_black(pitch: i32) -> bool {
     matches!(pitch.rem_euclid(12), 1 | 3 | 6 | 8 | 10)
 }
 
+/// Hit test: returns the index of the note under (t, pitch) and what a drag would do.
+fn hit_note(notes: &[Note], t: f32, p: i32) -> Option<(usize, Mode)> {
+    for (i, n) in notes.iter().enumerate().rev() {
+        if n.pitch as i32 != p {
+            continue;
+        }
+        if t >= n.start && t <= n.start + n.len {
+            let edge = (n.len * 0.25).min(0.12);
+            let mode = if t >= n.start + n.len - edge {
+                Mode::Resize
+            } else {
+                Mode::Move
+            };
+            return Some((i, mode));
+        }
+    }
+    None
+}
+
 #[derive(Clone, Copy)]
 pub struct Note {
     pub start: f32,
@@ -90,9 +109,10 @@ impl PianoRoll {
         );
         let pitch_y = |p: i32| rect.top() + (PITCH_HI as i32 - p) as f32 * ROW_H;
         let pitch_at = |y: f32| PITCH_HI as i32 - ((y - rect.top()) / ROW_H).floor() as i32;
-        let x_of = |t: f32| grid_rect.left() + (t - self.scroll) * self.zoom;
 
         // -- zoom / scroll ------------------------------------------------
+        let mut zoom = self.zoom;
+        let mut scroll = self.scroll;
         if let Some(hp) = response.hover_pos() {
             if grid_rect.contains(hp) {
                 let (dy, dx, ctrl) = ui.input(|i| {
@@ -103,18 +123,21 @@ impl PianoRoll {
                     )
                 });
                 if ctrl && dy.abs() > 0.1 {
-                    let before = self.scroll + (hp.x - grid_rect.left()) / self.zoom;
-                    self.zoom = (self.zoom * (dy * 0.003).exp()).clamp(20.0, 3000.0);
-                    self.scroll = before - (hp.x - grid_rect.left()) / self.zoom;
+                    let before = scroll + (hp.x - grid_rect.left()) / zoom;
+                    zoom = (zoom * (dy * 0.003).exp()).clamp(20.0, 3000.0);
+                    scroll = before - (hp.x - grid_rect.left()) / zoom;
                 } else if dy.abs() > 0.1 || dx.abs() > 0.1 {
-                    self.scroll -= (dy + dx) / self.zoom;
+                    scroll -= (dy + dx) / zoom;
                 }
             }
         }
         if response.dragged_by(egui::PointerButton::Middle) {
-            self.scroll -= response.drag_delta().x / self.zoom;
+            scroll -= response.drag_delta().x / zoom;
         }
-        self.scroll = self.scroll.max(0.0);
+        self.zoom = zoom;
+        self.scroll = scroll.max(0.0);
+
+        let x_of = |t: f32| grid_rect.left() + (t - self.scroll) * self.zoom;
 
         let snap_on = !ui.input(|i| i.modifiers.alt);
         let snap = |t: f32| -> f32 {
@@ -126,23 +149,6 @@ impl PianoRoll {
         };
 
         let t_at = |x: f32| self.scroll + (x - grid_rect.left()) / self.zoom;
-        let hit = |t: f32, p: i32| -> Option<(usize, Mode)> {
-            for (i, n) in self.notes.iter().enumerate().rev() {
-                if n.pitch as i32 != p {
-                    continue;
-                }
-                if t >= n.start && t <= n.start + n.len {
-                    let edge = (n.len * 0.25).min(0.12);
-                    let mode = if t >= n.start + n.len - edge {
-                        Mode::Resize
-                    } else {
-                        Mode::Move
-                    };
-                    return Some((i, mode));
-                }
-            }
-            None
-        };
 
         let pointer = response.interact_pointer_pos();
 
@@ -153,7 +159,7 @@ impl PianoRoll {
                 if grid_rect.contains(pos) {
                     let t = t_at(pos.x);
                     let p = pitch_at(pos.y).clamp(PITCH_LO as i32, PITCH_HI as i32);
-                    if hit(t, p).is_none() {
+                    if hit_note(&self.notes, t, p).is_none() {
                         let step = if self.grid > 0.0 { self.grid } else { 0.25 };
                         self.notes.push(Note {
                             start: snap(t).max(0.0),
@@ -171,7 +177,7 @@ impl PianoRoll {
                 if grid_rect.contains(pos) {
                     let t = t_at(pos.x);
                     let p = pitch_at(pos.y);
-                    if let Some((idx, _)) = hit(t, p) {
+                    if let Some((idx, _)) = hit_note(&self.notes, t, p) {
                         self.notes.remove(idx);
                         self.drag = None;
                         self.changed = true;
@@ -186,7 +192,7 @@ impl PianoRoll {
                 if grid_rect.contains(pos) {
                     let t = t_at(pos.x);
                     let p = pitch_at(pos.y);
-                    if let Some((idx, mode)) = hit(t, p) {
+                    if let Some((idx, mode)) = hit_note(&self.notes, t, p) {
                         let n = self.notes[idx];
                         self.drag = Some(Drag {
                             idx,

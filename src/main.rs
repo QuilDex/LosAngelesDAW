@@ -1618,9 +1618,8 @@ impl LosAngelesApp {
         });
 
         let mut vol = self.tracks[i].volume;
-        let slider = egui::Slider::new(&mut vol, 0.0..=1.5)
-            .show_value(false)
-            .desired_width((inner.width() - 64.0).max(40.0));
+        ui.spacing_mut().slider_width = (inner.width() - 64.0).max(40.0);
+        let slider = egui::Slider::new(&mut vol, 0.0..=1.5).show_value(false);
         if ui.add(slider).changed() {
             self.tracks[i].volume = vol;
             action = Some(HeaderAction::Mix);
@@ -1694,7 +1693,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "LOSANGELES",
         options,
-        Box::new(|cc| Box::new(LosAngelesApp::new(cc))),
+        Box::new(|cc| {
+            Ok(Box::new(LosAngelesApp::new(cc)) as Box<dyn eframe::App>)
+        }),
     )
 }
 
