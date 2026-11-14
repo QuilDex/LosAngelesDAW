@@ -1,23 +1,26 @@
-//! Track model: an unlimited list of tracks, each with clips, per-track effects
-//! and a plugin chain (CLAP / VST3 / VST).
+//! Track model: an unlimited list of tracks, each with clips, MIDI notes,
+//! per-track effects and a plugin chain (CLAP / VST3 / VST).
 //!
-//! Hosting real CLAP / VST3 / VST binaries requires a native plugin runtime
-//! (e.g. `clack` / `vst3-sys` FFI). That crate has not been wired in yet, so a
-//! plugin is modelled here as metadata plus a set of "wet/dry" style parameters;
-//! the audio engine can be extended later to run actual plugin DSP.
+//! Hosting real CLAP / VST3 / VST binaries needs a native plugin runtime
+//! (FFI to the plugin SDKs, e.g. `clack` / `vst3-sys`), which is not wired in
+//! yet. A plugin is therefore modelled here as metadata + wet mix: the browser,
+//! the chain order and the scanning work, the DSP hosting is the next stage.
 
 use std::path::PathBuf;
-
-use crate::library::PluginKinddied;
-use crate::decode::ClipData;
 use std::sync::Arc;
+
+use eframe::egui;
+
+use crate::decode::ClipData;
+use crate::library::PluginKind;
+use crate::pianoroll::Note;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EffectKind {
     Drive,
     Lowpass,
     Highpass,
-    Chorus,
+    Tremolo,
 }
 
 impl EffectKind {
@@ -25,14 +28,14 @@ impl EffectKind {
         EffectKind::Drive,
         EffectKind::Lowpass,
         EffectKind::Highpass,
-        EffectKind::Chorus,
+        EffectKind::Tremolo,
     ];
     pub fn label(self) -> &'static str {
         match self {
             EffectKind::Drive => "drive",
             EffectKind::Lowpass => "lowpass",
             EffectKind::Highpass => "highpass",
-            EffectKind::Chorus => "chorus",
+            EffectKind::Tremolo => "tremolo",
         }
     }
 }
@@ -40,7 +43,7 @@ impl EffectKind {
 #[derive(Clone)]
 pub struct Effect {
     pub kind: EffectKind,
-    /// 0..1 intensity / cutoff / mix.
+    /// 0..1 intensity / cutoff / depth.
     pub amount: f32,
     pub enabled: bool,
 }
@@ -59,7 +62,7 @@ impl Effect {
 pub struct PluginInst {
     pub name: String,
     pub path: PathBuf,
-    pub kind: crate::library::PluginKind,
+    pub kind: PluginKind,
     /// 0..1 wet mix (host-side, so it does something before DSP hosting lands).
     pub wet: f32,
     pub enabled: bool,
@@ -81,6 +84,7 @@ pub struct Track {
     pub solo: bool,
     pub effects: Vec<Effect>,
     pub plugins: Vec<PluginInst>,
+    pub notes: Vec<Note>,
 }
 
 impl Track {
@@ -93,11 +97,12 @@ impl Track {
             solo: false,
             effects: Vec::new(),
             plugins: Vec::new(),
+            notes: Vec::new(),
         }
     }
 }
 
-/// Palette used to colour fresh tracks (kept in sync with the warm theme).
+/// Palette used to colour fresh tracks.
 pub const TRACK_COLORS: [egui::Color32; 8] = [
     egui::Color32::from_rgb(0xE0, 0xA1, 0x5C), // amber
     egui::Color32::from_rgb(0x9E, 0xC1, 0x8C), // sage

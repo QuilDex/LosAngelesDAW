@@ -3,11 +3,17 @@
 //! A theme is a named palette of the colours the UI uses. Switching themes is
 //! instant: the app just swaps the `Theme` and reinstalls the egui visuals.
 
+use eframe::egui;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ThemeName {
     Warm,
     Noir,
     Neon,
+}
+
+impl ThemeName {
+    pub const ALL: [ThemeName; 3] = [ThemeName::Warm, ThemeName::Noir, ThemeName::Neon];
 }
 
 pub struct Theme {
