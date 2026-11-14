@@ -359,7 +359,7 @@ impl LosAngelesApp {
             .frame(
                 egui::Frame::none()
                     .fill(COL_PANEL)
-                    .inner_margin(egui::Margin::symmetric(14, 8)),
+                    .inner_margin(egui::Margin::symmetric(14.0, 8.0)),
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
@@ -466,7 +466,7 @@ impl LosAngelesApp {
             .frame(
                 egui::Frame::none()
                     .fill(COL_PANEL)
-                    .inner_margin(egui::Margin::symmetric(14, 4)),
+                    .inner_margin(egui::Margin::symmetric(14.0, 4.0)),
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
