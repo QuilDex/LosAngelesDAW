@@ -28,7 +28,7 @@ use std::time::Duration;
 use eframe::egui;
 
 use decode::ClipData;
-use engine::{AudioEngine, Command, MixSnapshot, PlacedNote, Shared, TrackMix};
+use engine::{AudioEngine, Command, InputEngine, MixSnapshot, PlacedNote, Shared, TrackMix};
 use library::{default_plugin_dirs, PluginEntry, PluginKind};
 use pianoroll::PianoRoll;
 use theme::{Theme, ThemeName};
@@ -62,6 +62,16 @@ struct LosAngelesApp {
     shared: Arc<Shared>,
     engine: Option<AudioEngine>,
     engine_error: Option<String>,
+
+    input: Option<InputEngine>,
+    input_error: Option<String>,
+    input_peak: f32,
+
+    output_devices: Vec<String>,
+    input_devices: Vec<String>,
+    output_choice: Option<String>,
+    input_choice: Option<String>,
+    show_settings: bool,
 
     playing: bool,
     tone: bool,
@@ -117,6 +127,14 @@ impl LosAngelesApp {
             shared,
             engine: None,
             engine_error: None,
+            input: None,
+            input_error: None,
+            input_peak: 0.0,
+            output_devices: Vec::new(),
+            input_devices: Vec::new(),
+            output_choice: None,
+            input_choice: None,
+            show_settings: false,
             playing: false,
             tone: false,
             gain: 0.8,
@@ -146,7 +164,9 @@ impl LosAngelesApp {
 
         app.scan_packs_dir(PathBuf::from("packs"));
         app.scan_plugins_dirs();
+        app.refresh_devices();
         app.init_audio();
+        app.init_input();
         app
     }
 
@@ -231,8 +251,47 @@ impl LosAngelesApp {
 
     // -- audio plumbing ----------------------------------------------------
 
+    fn refresh_devices(&mut self) {
+        self.output_devices = engine::output_devices();
+        self.input_devices = engine::input_devices();
+    }
+
+    fn init_input(&mut self) {
+        match InputEngine::start(self.shared.clone(), self.input_choice.as_deref()) {
+            Ok(input) => {
+                self.input = Some(input);
+                self.input_error = None;
+            }
+            Err(e) => {
+                self.input = None;
+                self.input_error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Drop the current output stream and open the chosen device.
+    fn set_output_device(&mut self, choice: Option<String>) {
+        self.output_choice = choice;
+        self.engine = None;
+        self.playing = false;
+        self.init_audio();
+    }
+
+    /// Drop the current input stream and open the chosen microphone.
+    fn set_input_device(&mut self, choice: Option<String>) {
+        self.input_choice = choice;
+        self.input = None;
+        self.input_peak = 0.0;
+        self.init_input();
+    }
+
+    fn poll_input(&mut self) {
+        let peak = Shared::load_f32(&self.shared.input_peak);
+        self.input_peak = (self.input_peak * 0.86).max(peak);
+    }
+
     fn init_audio(&mut self) {
-        match AudioEngine::start(self.shared.clone()) {
+        match AudioEngine::start_on(self.shared.clone(), self.output_choice.as_deref()) {
             Ok(mut engine) => {
                 engine.send(Command::SetGain(self.gain));
                 engine.send(Command::SetTone(self.tone));
@@ -529,6 +588,7 @@ impl LosAngelesApp {
         let red = theme.red;
         let mut add_track = false;
         let mut toggle_bottom: Option<Bottom> = None;
+        let mut open_settings = false;
 
         egui::TopBottomPanel::top("transport")
             .exact_height(62.0)
@@ -631,6 +691,13 @@ impl LosAngelesApp {
                     {
                         cycle_theme = true;
                     }
+                    if ui
+                        .small_button("AUDIO")
+                        .on_hover_text("output device, microphone, pack folders")
+                        .clicked()
+                    {
+                        open_settings = true;
+                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let pos = self.position_seconds();
@@ -654,6 +721,10 @@ impl LosAngelesApp {
 
         if add_track {
             self.add_track();
+        }
+        if open_settings {
+            self.refresh_devices();
+            self.show_settings = true;
         }
         if let Some(target) = toggle_bottom {
             self.bottom = if self.bottom == target {
@@ -915,6 +986,18 @@ impl LosAngelesApp {
             if ui.button("ADD").clicked() && !path.is_empty() {
                 self.add_pack_or_file(PathBuf::from(path));
             }
+            if ui
+                .button("BROWSE...")
+                .on_hover_text("pick any folder of samples on this machine")
+                .clicked()
+            {
+                if let Some(dir) = rfd::FileDialog::new()
+                    .set_title("Choose a sound pack folder")
+                    .pick_folder()
+                {
+                    self.add_pack_or_file(dir);
+                }
+            }
             if ui.button("RESCAN packs/").clicked() {
                 self.scan_packs_dir(PathBuf::from("packs"));
             }
@@ -991,6 +1074,18 @@ impl LosAngelesApp {
             let path = self.plugin_dir.trim().to_string();
             if ui.button("SCAN").clicked() && !path.is_empty() {
                 self.scan_plugin_dir(PathBuf::from(path));
+            }
+            if ui
+                .button("BROWSE...")
+                .on_hover_text("pick your VST3 / CLAP / VST folder")
+                .clicked()
+            {
+                if let Some(dir) = rfd::FileDialog::new()
+                    .set_title("Choose a plugin folder")
+                    .pick_folder()
+                {
+                    self.scan_plugin_dir(dir);
+                }
             }
             if ui.button("SYSTEM").clicked() {
                 self.scan_plugins_dirs();
@@ -1241,11 +1336,12 @@ impl LosAngelesApp {
         self.scroll + (x - rect.left()) / self.zoom.max(1.0)
     }
 
-    fn track_at_y(&self, y: f32) -> Option<usize> {
-        if y < RULER_H {
+    fn track_at_y(&self, rect: &egui::Rect, y: f32) -> Option<usize> {
+        let top = rect.top() + RULER_H;
+        if y < top {
             return None;
         }
-        let local = y - RULER_H + self.vscroll;
+        let local = y - top + self.vscroll;
         let idx = (local / (TRACK_H + LANE_GAP)).floor() as usize;
         if idx < self.tracks.len() {
             Some(idx)
@@ -1467,8 +1563,10 @@ impl LosAngelesApp {
                             let time = self.x_to_time(&lane_rect, pos.x);
                             let mut hit = None;
                             for (ci, clip) in self.clips.iter().enumerate() {
-                                let same_track =
-                                    self.track_at_y(pos.y).map(|t| t == clip.track).unwrap_or(false);
+                                let same_track = self
+                                    .track_at_y(&rect, pos.y)
+                                    .map(|t| t == clip.track)
+                                    .unwrap_or(false);
                                 if same_track
                                     && time >= clip.start
                                     && time <= clip.start + clip.data.duration
@@ -1486,7 +1584,7 @@ impl LosAngelesApp {
                     if let (Some(drag), Some(pos)) = (self.clip_drag, pointer) {
                         let time = (self.x_to_time(&lane_rect, pos.x) - drag.offset).max(0.0);
                         let track = self
-                            .track_at_y(pos.y)
+                            .track_at_y(&rect, pos.y)
                             .unwrap_or(self.clips[drag.idx].track);
                         if let Some(clip) = self.clips.get_mut(drag.idx) {
                             clip.start = time;
@@ -1504,7 +1602,7 @@ impl LosAngelesApp {
                 if resp.clicked() {
                     if let (Some(pos), true) = (pointer, self.clip_drag.is_none()) {
                         if lane_rect.contains(pos) {
-                            if let Some(t) = self.track_at_y(pos.y) {
+                            if let Some(t) = self.track_at_y(&rect, pos.y) {
                                 self.select_track(t);
                             }
                         }
@@ -1521,7 +1619,7 @@ impl LosAngelesApp {
                 });
                 if !dropped.is_empty() {
                     let hover = ui.input(|i| i.pointer.hover_pos()).unwrap_or(lane_rect.center());
-                    let track = self.track_at_y(hover.y).unwrap_or(self.selected);
+                    let track = self.track_at_y(&rect, hover.y).unwrap_or(self.selected);
                     let time = self
                         .x_to_time(&lane_rect, hover.x.clamp(lane_rect.left(), lane_rect.right()))
                         .max(0.0);
@@ -1662,12 +1760,14 @@ impl eframe::App for LosAngelesApp {
             self.set_playing(!self.playing);
         }
         self.poll_meter();
+        self.poll_input();
 
         self.top_bar(ctx);
         self.status_bar(ctx);
         self.browser_panel(ctx);
         self.bottom_panel(ctx);
         self.timeline(ctx);
+        self.settings_window(ctx);
 
         if self.dirty {
             self.dirty = false;
