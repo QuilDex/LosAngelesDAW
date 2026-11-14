@@ -69,6 +69,8 @@ pub struct Shared {
     pub track_frames: AtomicU64,
     /// Peak of the last block (f32 bits).
     pub peak: AtomicU32,
+    /// Peak of the last input block (f32 bits) — microphone meter.
+    pub input_peak: AtomicU32,
     pub stream_errors: AtomicU64,
 }
 
@@ -106,14 +108,60 @@ pub struct AudioEngine {
     pub info: EngineInfo,
 }
 
+/// Names of the available output devices (sorted, de-duplicated).
+pub fn output_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(devices) = host.output_devices() {
+        for d in devices {
+            if let Ok(name) = d.name() {
+                if !names.iter().any(|n| n == &name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names
+}
+
+/// Names of the available input devices (microphones, interfaces).
+pub fn input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(devices) = host.input_devices() {
+        for d in devices {
+            if let Ok(name) = d.name() {
+                if !names.iter().any(|n| n == &name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names
+}
+
 impl AudioEngine {
     pub fn start(shared: Arc<Shared>) -> Result<Self> {
+        Self::start_on(shared, None)
+    }
+
+    /// Open the named output device, or the system default when `wanted` is `None`.
+    pub fn start_on(shared: Arc<Shared>, wanted: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
         let host_name = host.id().name().to_string();
 
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| anyhow!("no default output device found"))?;
+        let device = match wanted {
+            Some(name) => host
+                .output_devices()
+                .ok()
+                .and_then(|mut it| it.find(|d| d.name().ok().as_deref() == Some(name)))
+                .ok_or_else(|| anyhow!("output device `{name}` not found"))?,
+            None => host
+                .default_output_device()
+                .ok_or_else(|| anyhow!("no default output device found"))?,
+        };
         let device_name = device.name().unwrap_or_else(|_| "unknown output".to_string());
 
         let supported = device
@@ -185,6 +233,92 @@ impl AudioEngine {
         // Never blocks; a full queue drops the command (the UI resends state).
         let _ = self.producer.push(cmd);
     }
+}
+
+/// Microphone / line input: opens an input stream and publishes its peak.
+pub struct InputEngine {
+    _stream: cpal::Stream,
+    pub device: String,
+    pub channels: u16,
+}
+
+impl InputEngine {
+    pub fn start(shared: Arc<Shared>, wanted: Option<&str>) -> Result<Self> {
+        let host = cpal::default_host();
+
+        let device = match wanted {
+            Some(name) => host
+                .input_devices()
+                .ok()
+                .and_then(|mut it| it.find(|d| d.name().ok().as_deref() == Some(name)))
+                .ok_or_else(|| anyhow!("input device `{name}` not found"))?,
+            None => host
+                .default_input_device()
+                .ok_or_else(|| anyhow!("no default input device found"))?,
+        };
+        let device_name = device.name().unwrap_or_else(|_| "unknown input".to_string());
+
+        let supported = device
+            .default_input_config()
+            .map_err(|e| anyhow!("default input config unavailable: {e}"))?;
+        let sample_format = supported.sample_format();
+        let config: cpal::StreamConfig = supported.into();
+        let channels = config.channels;
+
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => build_input::<f32, _>(&device, &config, shared, |s| *s),
+            cpal::SampleFormat::I16 => {
+                build_input::<i16, _>(&device, &config, shared, |s| *s as f32 / 32_768.0)
+            }
+            cpal::SampleFormat::U16 => build_input::<u16, _>(&device, &config, shared, |s| {
+                (*s as f32 - 32_768.0) / 32_768.0
+            }),
+            other => return Err(anyhow!("unsupported input sample format: {other:?}")),
+        }
+        .map_err(|e| anyhow!("cannot open `{device_name}`: {e}"))?;
+
+        stream
+            .play()
+            .map_err(|e| anyhow!("input stream.play() failed: {e}"))?;
+
+        Ok(Self {
+            _stream: stream,
+            device: device_name,
+            channels,
+        })
+    }
+}
+
+fn build_input<T, F>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    shared: Arc<Shared>,
+    to_f32: F,
+) -> std::result::Result<cpal::Stream, cpal::BuildStreamError>
+where
+    T: cpal::SizedSample,
+    F: Fn(&T) -> f32 + Send + 'static,
+{
+    let err_shared = shared.clone();
+    device.build_input_stream::<T, _, _>(
+        config,
+        move |data: &[T], _info: &cpal::InputCallbackInfo| {
+            let mut peak = 0.0f32;
+            for s in data {
+                let a = to_f32(s).abs();
+                if a > peak {
+                    peak = a;
+                }
+            }
+            // Fall back gently so a silent mic does not freeze the meter.
+            let prev = Shared::load_f32(&shared.input_peak);
+            Shared::store_f32(&shared.input_peak, peak.max(prev * 0.55));
+        },
+        move |_err| {
+            err_shared.stream_errors.fetch_add(1, Ordering::Relaxed);
+        },
+        None,
+    )
 }
 
 /// Per-track filter memory, living on the audio thread.
