@@ -1451,6 +1451,7 @@ impl LosAngelesApp {
 
                 // Tracks.
                 let mut header_actions: Vec<(usize, HeaderAction)> = Vec::new();
+                let mut clip_rects: Vec<(usize, egui::Rect)> = Vec::new();
                 for i in 0..self.tracks.len() {
                     let top = RULER_H + i as f32 * (TRACK_H + LANE_GAP) - self.vscroll;
                     if top + TRACK_H < RULER_H || top > rect.height() {
@@ -1504,6 +1505,7 @@ impl LosAngelesApp {
                         if visible.width() < 2.0 || visible.height() < 4.0 {
                             continue;
                         }
+                        clip_rects.push((ci, visible));
                         let dragging = self.clip_drag.map(|d| d.idx == ci).unwrap_or(false);
                         let color = self.tracks[i].color;
                         painter.rect_filled(
@@ -1561,52 +1563,59 @@ impl LosAngelesApp {
                     );
                 }
 
-                // Clip drag + selection.
-                let pointer = resp.interact_pointer_pos();
-                if resp.drag_started_by(egui::PointerButton::Primary) {
-                    if let Some(pos) = pointer {
-                        if lane_rect.contains(pos) {
-                            let time = self.x_to_time(&lane_rect, pos.x);
-                            let mut hit = None;
-                            for (ci, clip) in self.clips.iter().enumerate() {
-                                let same_track = self
-                                    .track_at_y(&rect, pos.y)
-                                    .map(|t| t == clip.track)
-                                    .unwrap_or(false);
-                                if same_track
-                                    && time >= clip.start
-                                    && time <= clip.start + clip.data.duration
-                                {
-                                    hit = Some((ci, time - clip.start));
-                                }
-                            }
-                            if let Some((idx, offset)) = hit {
-                                self.clip_drag = Some(ClipDrag { idx, offset });
-                            }
+                // Clip interaction: one widget per visible clip. A press lands
+                // on exactly the clip under the pointer, and while dragging the
+                // row under the pointer decides the track — no panel-wide guess.
+                for (ci, crect) in clip_rects.iter() {
+                    let cresp = ui.interact(
+                        *crect,
+                        egui::Id::new(("clip", *ci)),
+                        egui::Sense::click_and_drag(),
+                    );
+                    let pressed = cresp.drag_started_by(egui::PointerButton::Primary)
+                        || cresp.clicked();
+                    if pressed {
+                        let track = self.clips[*ci].track;
+                        self.select_track(track);
+                    }
+                    if cresp.drag_started_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = cresp.interact_pointer_pos() {
+                            let grabbed = self.x_to_time(&lane_rect, pos.x);
+                            let clip = &self.clips[*ci];
+                            let offset = (grabbed - clip.start)
+                                .clamp(0.0, clip.data.duration.max(0.01));
+                            self.clip_drag = Some(ClipDrag { idx: *ci, offset });
                         }
                     }
                 }
-                if resp.dragged() {
-                    if let (Some(drag), Some(pos)) = (self.clip_drag, pointer) {
-                        let time = (self.x_to_time(&lane_rect, pos.x) - drag.offset).max(0.0);
-                        let track = self
-                            .track_at_y(&rect, pos.y)
-                            .unwrap_or(self.clips[drag.idx].track);
-                        if let Some(clip) = self.clips.get_mut(drag.idx) {
-                            clip.start = time;
-                            clip.track = track;
-                            self.dirty = true;
+                if let Some(drag) = self.clip_drag {
+                    let pointer = ui.input(|i| {
+                        i.pointer
+                            .interact_pos()
+                            .or_else(|| i.pointer.latest_pos())
+                    });
+                    if ui.input(|i| i.pointer.primary_down()) {
+                        if let Some(pos) = pointer {
+                            let time = (self.x_to_time(&lane_rect, pos.x) - drag.offset).max(0.0);
+                            // Clamp into the lane area so a pointer slightly
+                            // above/below the grid still hits a real track.
+                            let y = pos.y.clamp(lane_rect.top() + 1.0, lane_rect.max.y - 1.0);
+                            let track = self
+                                .track_at_y(&rect, y)
+                                .unwrap_or(self.clips[drag.idx].track);
+                            if let Some(clip) = self.clips.get_mut(drag.idx) {
+                                clip.start = time;
+                                clip.track = track;
+                                self.dirty = true;
+                            }
                         }
-                    }
-                }
-                if resp.drag_stopped() {
-                    if self.clip_drag.is_some() {
+                    } else {
+                        // Button released: hand the new position to the mixer.
                         self.clip_drag = None;
                         self.sync_mix();
                     }
-                }
-                if resp.clicked() {
-                    if let (Some(pos), true) = (pointer, self.clip_drag.is_none()) {
+                } else if resp.clicked() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
                         if lane_rect.contains(pos) {
                             if let Some(t) = self.track_at_y(&rect, pos.y) {
                                 self.select_track(t);
@@ -1615,7 +1624,7 @@ impl LosAngelesApp {
                     }
                 }
 
-                // Files dropped from the OS.
+                // Files dropped from the OS land where the pointer is.
                 let dropped: Vec<PathBuf> = ui.input(|i| {
                     i.raw
                         .dropped_files
@@ -1624,11 +1633,17 @@ impl LosAngelesApp {
                         .collect()
                 });
                 if !dropped.is_empty() {
-                    let hover = ui.input(|i| i.pointer.hover_pos()).unwrap_or(lane_rect.center());
-                    let track = self.track_at_y(&rect, hover.y).unwrap_or(self.selected);
-                    let time = self
-                        .x_to_time(&lane_rect, hover.x.clamp(lane_rect.left(), lane_rect.right()))
-                        .max(0.0);
+                    let fallback = {
+                        let t = self.position_seconds();
+                        egui::pos2(self.time_to_x(&lane_rect, t), lane_rect.top() + 1.0)
+                    };
+                    let pos = ui
+                        .input(|i| i.pointer.latest_pos().or_else(|| i.pointer.hover_pos()))
+                        .unwrap_or(fallback);
+                    let y = pos.y.clamp(lane_rect.top() + 1.0, lane_rect.max.y - 1.0);
+                    let track = self.track_at_y(&rect, y).unwrap_or(self.selected);
+                    let x = pos.x.clamp(lane_rect.left(), lane_rect.right());
+                    let time = self.x_to_time(&lane_rect, x).max(0.0);
                     drop_files = Some((dropped, track, time));
                 }
 
