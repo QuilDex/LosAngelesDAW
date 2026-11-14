@@ -1754,6 +1754,148 @@ enum HeaderAction {
 }
 
 impl eframe::App for LosAngelesApp {
+    // -- audio settings window --------------------------------------------
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let theme = self.theme.clone();
+        let mut open = self.show_settings;
+        let mut pick_output: Option<Option<String>> = None;
+        let mut pick_input: Option<Option<String>> = None;
+        let mut rescan = false;
+        let mut test_tone = false;
+
+        egui::Window::new("AUDIO")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(470.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("OUTPUT DEVICE")
+                        .size(9.0)
+                        .color(theme.dim),
+                );
+                let mut out_choice = self.output_choice.clone();
+                egui::ComboBox::from_label("")
+                    .selected_text(
+                        self.output_choice
+                            .clone()
+                            .unwrap_or_else(|| "system default".to_string()),
+                    )
+                    .width(300.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut out_choice, None, "system default");
+                        for dev in &self.output_devices {
+                            ui.selectable_value(&mut out_choice, Some(dev.clone()), dev);
+                        }
+                    });
+                if out_choice != self.output_choice {
+                    pick_output = Some(out_choice);
+                }
+                if self.output_devices.is_empty() {
+                    ui.label(
+                        egui::RichText::new("no output devices reported by the host")
+                            .size(10.0)
+                            .color(theme.red),
+                    );
+                }
+                match &self.engine {
+                    Some(engine) => {
+                        let info = &engine.info;
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "running · {} · {} Hz · {} ch",
+                                info.device, info.sample_rate, info.channels
+                            ))
+                            .size(10.0)
+                            .color(theme.accent),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new(match &self.engine_error {
+                                Some(err) => format!("offline · {err}"),
+                                None => "offline".to_string(),
+                            })
+                            .size(10.0)
+                            .color(theme.red),
+                        );
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(egui::RichText::new("INPUT / MICROPHONE").size(9.0).color(theme.dim));
+                let mut in_choice = self.input_choice.clone();
+                egui::ComboBox::from_label("")
+                    .selected_text(
+                        self.input_choice
+                            .clone()
+                            .unwrap_or_else(|| "system default".to_string()),
+                    )
+                    .width(300.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut in_choice, None, "system default");
+                        for dev in &self.input_devices {
+                            ui.selectable_value(&mut in_choice, Some(dev.clone()), dev);
+                        }
+                    });
+                if in_choice != self.input_choice {
+                    pick_input = Some(in_choice);
+                }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("level").size(10.0).color(theme.dim));
+                    ui.add(
+                        egui::ProgressBar::new(self.input_peak.clamp(0.0, 1.0))
+                            .desired_width(220.0)
+                            .text(if self.input.is_some() { "live" } else { "off" }),
+                    );
+                });
+                if let Some(err) = &self.input_error {
+                    ui.label(egui::RichText::new(err).size(10.0).color(theme.red));
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("RESCAN DEVICES").clicked() {
+                        rescan = true;
+                    }
+                    if ui
+                        .button("TEST TONE")
+                        .on_hover_text("toggle the 440 Hz reference tone")
+                        .clicked()
+                    {
+                        test_tone = true;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Sample packs are added in the SOUNDS tab of the left browser (BROWSE... picks any folder).",
+                    )
+                    .size(9.0)
+                    .color(theme.dim),
+                );
+            });
+
+        self.show_settings = open;
+        if rescan {
+            self.refresh_devices();
+        }
+        if let Some(choice) = pick_output {
+            self.set_output_device(choice);
+        }
+        if let Some(choice) = pick_input {
+            self.set_input_device(choice);
+        }
+        if test_tone {
+            self.set_tone(!self.tone);
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let space = ctx.input(|i| i.key_pressed(egui::Key::Space));
         if space {
