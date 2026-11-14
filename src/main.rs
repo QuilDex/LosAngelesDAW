@@ -146,8 +146,8 @@ impl AudioEngine {
                         cpal::BufferSize::Default => 0,
                     };
                     let info = EngineInfo {
-                        host: host_name,
-                        device: device_name,
+                        host: host_name.clone(),
+                        device: device_name.clone(),
                         sample_rate: config.sample_rate.0,
                         channels: config.channels,
                         buffer_frames,
