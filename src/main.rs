@@ -1271,28 +1271,32 @@ impl LosAngelesApp {
                     rect.max,
                 );
 
-                // Scroll / zoom.
-                if let Some(hp) = resp.hover_pos() {
-                    let (dy, dx, ctrl, shift) = ui.input(|i| {
-                        (
-                            i.smooth_scroll_delta.y,
-                            i.smooth_scroll_delta.x,
-                            i.modifiers.ctrl || i.modifiers.command,
-                            i.modifiers.shift,
-                        )
-                    });
-                    if ctrl && dy.abs() > 0.1 {
-                        let anchor = self.x_to_time(&lane_rect, hp.x);
-                        self.zoom = (self.zoom * (dy * 0.004).exp()).clamp(8.0, 4000.0);
-                        self.scroll = anchor - (hp.x - lane_rect.left()) / self.zoom;
-                    } else if shift && dy.abs() > 0.1 {
-                        self.scroll -= dy / self.zoom;
-                    } else {
-                        if dy.abs() > 0.1 {
-                            self.vscroll -= dy;
-                        }
-                        if dx.abs() > 0.1 {
-                            self.scroll -= dx / self.zoom;
+                // Scroll / zoom. Disabled while dragging a clip, otherwise the
+                // timeline scrolls under the pointer instead of the clip
+                // actually moving under it.
+                if self.clip_drag.is_none() {
+                    if let Some(hp) = resp.hover_pos() {
+                        let (dy, dx, ctrl, shift) = ui.input(|i| {
+                            (
+                                i.smooth_scroll_delta.y,
+                                i.smooth_scroll_delta.x,
+                                i.modifiers.ctrl || i.modifiers.command,
+                                i.modifiers.shift,
+                            )
+                        });
+                        if ctrl && dy.abs() > 0.1 {
+                            let anchor = self.x_to_time(&lane_rect, hp.x);
+                            self.zoom = (self.zoom * (dy * 0.004).exp()).clamp(8.0, 4000.0);
+                            self.scroll = anchor - (hp.x - lane_rect.left()) / self.zoom;
+                        } else if shift && dy.abs() > 0.1 {
+                            self.scroll -= dy / self.zoom;
+                        } else {
+                            if dy.abs() > 0.1 {
+                                self.vscroll -= dy;
+                            }
+                            if dx.abs() > 0.1 {
+                                self.scroll -= dx / self.zoom;
+                            }
                         }
                     }
                 }
