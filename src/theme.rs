@@ -14,8 +14,17 @@ pub enum ThemeName {
 
 impl ThemeName {
     pub const ALL: [ThemeName; 3] = [ThemeName::Warm, ThemeName::Noir, ThemeName::Neon];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeName::Warm => "warm · analog",
+            ThemeName::Noir => "noir · graphite",
+            ThemeName::Neon => "neon · chrome",
+        }
+    }
 }
 
+#[derive(Clone)]
 pub struct Theme {
     pub name: &'static str,
     pub bg: egui::Color32,
@@ -77,5 +86,66 @@ impl Theme {
                 red: egui::Color32::from_rgb(0xFF, 0x4D, 0x7E),
             },
         }
+    }
+
+    /// Install this palette as the egui style for the whole app.
+    pub fn apply(&self, ctx: &egui::Context) {
+        let mut visuals = egui::Visuals::dark();
+
+        visuals.override_text_color = Some(self.cream);
+        visuals.panel_fill = self.panel;
+        visuals.window_fill = self.panel;
+        visuals.extreme_bg_color = self.bg;
+        visuals.faint_bg_color = self.lane;
+        visuals.hyperlink_color = self.accent;
+        visuals.selection.bg_fill = self.accent_hot;
+        visuals.selection.stroke = egui::Stroke::new(1.0, self.cream);
+
+        let w = &mut visuals.widgets;
+        w.noninteractive.bg_fill = self.panel;
+        w.noninteractive.weak_bg_fill = self.panel;
+        w.noninteractive.bg_stroke = egui::Stroke::new(1.0, self.grid);
+        w.noninteractive.fg_stroke = egui::Stroke::new(1.0, self.cream);
+        w.noninteractive.rounding = egui::Rounding::same(2.0);
+
+        w.inactive.bg_fill = self.panel_hi;
+        w.inactive.weak_bg_fill = self.panel_hi;
+        w.inactive.bg_stroke = egui::Stroke::new(1.0, self.grid);
+        w.inactive.fg_stroke = egui::Stroke::new(1.0, self.cream);
+        w.inactive.rounding = egui::Rounding::same(2.0);
+
+        w.hovered.bg_fill = self.panel_hi.gamma_multiply(1.3);
+        w.hovered.weak_bg_fill = self.panel_hi.gamma_multiply(1.3);
+        w.hovered.bg_stroke = egui::Stroke::new(1.0, self.accent_hot);
+        w.hovered.fg_stroke = egui::Stroke::new(1.0, self.accent);
+        w.hovered.rounding = egui::Rounding::same(2.0);
+
+        w.active.bg_fill = self.accent_hot.gamma_multiply(0.55);
+        w.active.weak_bg_fill = self.accent_hot.gamma_multiply(0.55);
+        w.active.bg_stroke = egui::Stroke::new(1.0, self.accent);
+        w.active.fg_stroke = egui::Stroke::new(1.0, self.cream);
+        w.active.rounding = egui::Rounding::same(2.0);
+
+        w.open.bg_fill = self.panel_hi;
+        w.open.weak_bg_fill = self.panel_hi;
+        w.open.bg_stroke = egui::Stroke::new(1.0, self.grid);
+        w.open.fg_stroke = egui::Stroke::new(1.0, self.cream);
+        w.open.rounding = egui::Rounding::same(2.0);
+
+        let mut style = (*ctx.style()).clone();
+        style.visuals = visuals;
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.button_padding = egui::vec2(10.0, 4.0);
+        style.spacing.slider_width = 110.0;
+        style.text_styles = [
+            (egui::TextStyle::Heading, egui::FontId::proportional(18.0)),
+            (egui::TextStyle::Body, egui::FontId::proportional(13.0)),
+            (egui::TextStyle::Button, egui::FontId::proportional(12.0)),
+            (egui::TextStyle::Small, egui::FontId::proportional(10.0)),
+            (egui::TextStyle::Monospace, egui::FontId::monospace(12.0)),
+        ]
+        .into();
+
+        ctx.set_style(style);
     }
 }
