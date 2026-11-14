@@ -1753,7 +1753,7 @@ enum HeaderAction {
     OpenPiano,
 }
 
-impl eframe::App for LosAngelesApp {
+impl LosAngelesApp {
     // -- audio settings window --------------------------------------------
 
     fn settings_window(&mut self, ctx: &egui::Context) {
@@ -1895,7 +1895,9 @@ impl eframe::App for LosAngelesApp {
             self.set_tone(!self.tone);
         }
     }
+}
 
+impl eframe::App for LosAngelesApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let space = ctx.input(|i| i.key_pressed(egui::Key::Space));
         if space {
