@@ -61,6 +61,13 @@ struct ClipDrag {
     offset: f32,
 }
 
+/// A sound dragged out of the browser towards the timeline. `pos` lags the
+/// pointer a little so the ghost glides instead of jumping frame by frame.
+struct SoundDrag {
+    data: Arc<ClipData>,
+    pos: egui::Pos2,
+}
+
 struct LosAngelesApp {
     shared: Arc<Shared>,
     engine: Option<AudioEngine>,
@@ -105,6 +112,9 @@ struct LosAngelesApp {
     roll_track: usize,
 
     clip_drag: Option<ClipDrag>,
+    sound_drag: Option<SoundDrag>,
+    clip_cache: Vec<(PathBuf, Arc<ClipData>)>,
+    lane_rect: egui::Rect,
     notice: Option<String>,
     notice_bad: bool,
     dirty: bool,
@@ -162,6 +172,9 @@ impl LosAngelesApp {
             roll: PianoRoll::default(),
             roll_track: 0,
             clip_drag: None,
+            sound_drag: None,
+            clip_cache: Vec::new(),
+            lane_rect: egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(0.0, 0.0)),
             notice: None,
             notice_bad: false,
             dirty: true,
@@ -475,6 +488,178 @@ impl LosAngelesApp {
             .filter(|c| c.track == track)
             .map(|c| c.start + c.data.duration)
             .fold(0.0f32, f32::max)
+    }
+
+    /// Decoded clips are kept around: preview, the drag ghost and the drop all
+    /// reuse one decode of the same file.
+    fn cached_clip(&mut self, path: &std::path::Path) -> Option<Arc<ClipData>> {
+        if let Some((_, data)) = self.clip_cache.iter().find(|(p, _)| p == path) {
+            return Some(data.clone());
+        }
+        match ClipData::decode(path) {
+            Ok(data) => {
+                let data = Arc::new(data);
+                self.clip_cache.push((path.to_path_buf(), data.clone()));
+                if self.clip_cache.len() > 32 {
+                    self.clip_cache.remove(0);
+                }
+                Some(data)
+            }
+            Err(e) => {
+                self.clip_cache.push((path.to_path_buf(), Arc::new(ClipData {
+                    name: "unreadable".to_string(),
+                    samples: Vec::new(),
+                    sample_rate: 48_000,
+                    duration: 0.0,
+                    peaks: Vec::new(),
+                })));
+                self.notice = Some(format!("{}: {e}", path.display()));
+                self.notice_bad = true;
+                None
+            }
+        }
+    }
+
+    fn preview_sound(&mut self, path: &std::path::Path) {
+        let Some(data) = self.cached_clip(path) else {
+            return;
+        };
+        let name = data.name.clone();
+        let duration = data.duration;
+        if let Some(engine) = self.engine.as_mut() {
+            engine.preview(Some(data));
+        } else {
+            self.notice = Some("audio offline — no preview".into());
+            self.notice_bad = true;
+            return;
+        }
+        self.notice = Some(format!("preview · {name} · {duration:.2}s"));
+        self.notice_bad = false;
+    }
+
+    fn place_clip(&mut self, data: Arc<ClipData>, track: usize, start: f32) {
+        let Some(last) = self.tracks.len().checked_sub(1) else {
+            return;
+        };
+        let track = track.min(last);
+        let name = data.name.clone();
+        let duration = data.duration;
+        let start = start.max(0.0);
+        self.clips.push(PlacedClip { data, track, start });
+        self.notice = Some(format!(
+            "{name} · {duration:.2}s → {} @ {start:.2}s",
+            self.tracks[track].name
+        ));
+        self.notice_bad = false;
+        self.sync_mix();
+        self.dirty = true;
+    }
+
+    /// Ruler grid step in seconds, shared by the drawn ruler and the snapping.
+    fn snap_step(&self) -> f32 {
+        let mut s = 1.0f32;
+        while s * self.zoom < 60.0 {
+            s *= 2.0;
+        }
+        s
+    }
+
+    /// Nearest ruler line to the pointer: the box lands on a real grid line,
+    /// not at a random offset, until the pointer leaves the lane.
+    fn snapped_time(&self, lane: &egui::Rect, x: f32) -> f32 {
+        let t = self.x_to_time(lane, x.max(lane.left())).max(0.0);
+        let step = self.snap_step();
+        ((t / step).round() * step).max(0.0)
+    }
+
+    /// Sound dragged from the browser: the ghost follows the pointer with a
+    /// little inertia, snaps to the line under it, and lands on release.
+    fn drag_and_drop_sound(&mut self, ctx: &egui::Context) {
+        let Some(mut drag) = self.sound_drag.take() else {
+            return;
+        };
+        let Some(pos) = ctx.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()))
+        else {
+            self.sound_drag = Some(drag);
+            return;
+        };
+
+        drag.pos += (pos - drag.pos) * 0.5;
+        let lane = self.lane_rect;
+        let over = lane.contains(drag.pos);
+        let time = self.snapped_time(&lane, drag.pos.x);
+        let track = if self.tracks.is_empty() {
+            0
+        } else {
+            let y = drag.pos.y.clamp(lane.top(), lane.bottom() - 1.0);
+            let local = (y - lane.top() + self.vscroll).max(0.0);
+            ((local / (TRACK_H + LANE_GAP)).floor() as usize).min(self.tracks.len() - 1)
+        };
+
+        let theme = self.theme.clone();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::new("sound-drag"),
+        ));
+
+        if over {
+            let x = self.time_to_x(&lane, time);
+            let w = (drag.data.duration * self.zoom).max(24.0);
+            let top = lane.top() + track as f32 * (TRACK_H + LANE_GAP) - self.vscroll;
+            let color = self.tracks.get(track).map(|t| t.color).unwrap_or(theme.accent);
+            let ghost = egui::Rect::from_min_size(
+                egui::pos2(x, top + 8.0),
+                egui::vec2(w, TRACK_H - 16.0),
+            );
+            painter.rect_filled(
+                ghost,
+                egui::Rounding::same(3.0),
+                color.gamma_multiply(0.30),
+            );
+            painter.rect_stroke(
+                ghost,
+                egui::Rounding::same(3.0),
+                egui::Stroke::new(1.0_f32, color),
+            );
+            painter.line_segment(
+                [egui::pos2(x, lane.top()), egui::pos2(x, lane.bottom())],
+                egui::Stroke::new(1.2_f32, theme.accent),
+            );
+            painter.text(
+                ghost.left_top() + egui::vec2(5.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                &drag.data.name,
+                egui::FontId::proportional(10.0),
+                theme.cream,
+            );
+        }
+
+        let label = egui::Rect::from_min_size(
+            drag.pos + egui::vec2(14.0, -10.0),
+            egui::vec2(190.0, 22.0),
+        );
+        painter.rect_filled(label, egui::Rounding::same(3.0), theme.panel_hi);
+        painter.rect_stroke(
+            label,
+            egui::Rounding::same(3.0),
+            egui::Stroke::new(1.0_f32, theme.accent),
+        );
+        painter.text(
+            label.left_center() + egui::vec2(6.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            format!("{} · {:.2}s", drag.data.name, drag.data.duration),
+            egui::FontId::proportional(10.0),
+            theme.cream,
+        );
+
+        if ctx.input(|i| i.pointer.primary_down()) {
+            ctx.request_repaint();
+            self.sound_drag = Some(drag);
+            return;
+        }
+        if over {
+            self.place_clip(drag.data, track, time);
+        }
     }
 
     fn insert_audio(&mut self, path: PathBuf) {
@@ -902,7 +1087,8 @@ impl LosAngelesApp {
     }
 
     fn sounds_tab(&mut self, ui: &mut egui::Ui, theme: &Theme) {
-        let mut insert: Option<PathBuf> = None;
+        let mut preview_src: Option<PathBuf> = None;
+        let mut drag_src: Option<PathBuf> = None;
         let mut swap: Option<(usize, usize)> = None;
         let mut drop_pack: Option<usize> = None;
 
@@ -957,15 +1143,18 @@ impl LosAngelesApp {
                                             .size(11.0)
                                             .color(theme.cream),
                                     )
-                                    .sense(egui::Sense::click()),
+                                    .sense(egui::Sense::click_and_drag()),
                                 );
                                 if resp.clicked() {
-                                    insert = Some(sound.path.clone());
+                                    preview_src = Some(sound.path.clone());
+                                }
+                                if resp.drag_started() {
+                                    drag_src = Some(sound.path.clone());
                                 }
                                 if resp.hovered() {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                                 }
-                                resp.on_hover_text("click = insert on the selected track");
+                                resp.on_hover_text("click = preview · drag onto the timeline");
                             }
                             if self.packs[i].sounds.is_empty() {
                                 ui.label(
@@ -1019,8 +1208,17 @@ impl LosAngelesApp {
             }
         });
 
-        if let Some(path) = insert {
-            self.insert_audio(path);
+        if let Some(path) = preview_src {
+            self.preview_sound(&path);
+        }
+        if let Some(path) = drag_src {
+            if let Some(data) = self.cached_clip(&path) {
+                let pos = ui
+                    .ctx()
+                    .input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()))
+                    .unwrap_or(egui::Pos2::ZERO);
+                self.sound_drag = Some(SoundDrag { data, pos });
+            }
         }
         if let Some((a, b)) = swap {
             self.packs.swap(a, b);
@@ -1419,6 +1617,7 @@ impl LosAngelesApp {
                     egui::pos2(rect.left() + head_w, rect.top() + RULER_H),
                     rect.max,
                 );
+                self.lane_rect = lane_rect;
 
                 // Scroll / zoom. Disabled while dragging a clip, otherwise the
                 // timeline scrolls under the pointer instead of the clip
@@ -1465,13 +1664,7 @@ impl LosAngelesApp {
                     egui::Stroke::new(1.0_f32, theme.grid),
                 );
 
-                let step = {
-                    let mut s = 1.0f32;
-                    while s * self.zoom < 60.0 {
-                        s *= 2.0;
-                    }
-                    s
-                };
+                let step = self.snap_step();
                 let mut t = (self.scroll / step).floor() * step;
                 while t <= self.scroll + lane_rect.width() / self.zoom {
                     if t >= 0.0 {
@@ -1980,6 +2173,7 @@ impl eframe::App for LosAngelesApp {
         self.bottom_panel(ctx);
         self.timeline(ctx);
         self.settings_window(ctx);
+        self.drag_and_drop_sound(ctx);
 
         if self.dirty {
             self.dirty = false;

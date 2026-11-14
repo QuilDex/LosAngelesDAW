@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+use crate::decode::ClipData;
 use crate::pianoroll::Note;
 use crate::tracks::PlacedClip;
 
@@ -51,21 +52,15 @@ pub struct MixSnapshot {
     pub notes: Vec<PlacedNote>,
 }
 
-/// A sample being auditioned from the browser. It runs on its own clock,
-/// independent of the transport, so a sound is heard before it is placed.
-#[derive(Clone)]
-pub struct PreviewVoice {
-    pub data: Arc<ClipData>,
-    /// Bumped by the UI for every new preview so the audio thread restarts it.
-    pub serial: u64,
-}
-
 pub enum Command {
     Play,
     Stop,
     SetGain(f32),
     SetTone(bool),
     SetMix(Box<MixSnapshot>),
+    /// Audition a sample from the browser. It runs on its own clock, outside
+    /// the transport, so a sound is heard before it is placed on a track.
+    Preview(Option<Arc<ClipData>>),
 }
 
 /// State shared between the audio callback and the UI.
@@ -242,6 +237,11 @@ impl AudioEngine {
         // Never blocks; a full queue drops the command (the UI resends state).
         let _ = self.producer.push(cmd);
     }
+
+    /// Start auditioning `data` from its first sample (or stop with `None`).
+    pub fn preview(&mut self, data: Option<Arc<ClipData>>) {
+        self.send(Command::Preview(data));
+    }
 }
 
 /// Microphone / line input: opens an input stream and publishes its peak.
@@ -360,6 +360,8 @@ where
     let mut frames = 0u64;
     let mut mix = MixSnapshot::default();
     let mut dsp = [TrackDsp::default(); MAX_DSP_TRACKS];
+    let mut preview: Option<Arc<ClipData>> = None;
+    let mut preview_pos = 0.0f32;
 
     let err_shared = shared.clone();
 
@@ -376,6 +378,10 @@ where
                     Command::SetGain(g) => gain_target = g.clamp(0.0, 2.0),
                     Command::SetTone(on) => tone = on,
                     Command::SetMix(snapshot) => mix = *snapshot,
+                    Command::Preview(data) => {
+                        preview = data;
+                        preview_pos = 0.0;
+                    }
                 }
             }
 
@@ -457,6 +463,25 @@ where
                         d.gain += (tm.volume - d.gain) * 0.0015;
                         sample += ts * d.gain;
                     }
+                }
+
+                // Browser audition: read straight from the decoded buffer.
+                let mut preview_done = false;
+                if let Some(pv) = &preview {
+                    let i = preview_pos as usize;
+                    if i + 1 < pv.samples.len() {
+                        let frac = preview_pos - i as f32;
+                        let s0 = pv.samples[i];
+                        let s1 = pv.samples[i + 1];
+                        sample += (s0 + (s1 - s0) * frac) * 0.9;
+                        preview_pos += pv.sample_rate.max(1) as f32 / sample_rate;
+                    } else {
+                        preview_done = true;
+                    }
+                }
+                if preview_done {
+                    preview = None;
+                    preview_pos = 0.0;
                 }
 
                 let out = (sample * gain_current).clamp(-1.0, 1.0);
