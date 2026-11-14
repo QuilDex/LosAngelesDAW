@@ -1,6 +1,7 @@
 //! LOSANGELES — experimental grid-free DAW.
 //!
-//! Stage 1 skeleton: application window, lock-free audio engine, empty free timeline.
+//! Stage 2: decode wav/mp3/ogg files, drop them from Explorer onto the free
+//! timeline, see the waveform and hear the clips mixed in the audio callback.
 //!
 //! Planned module layout (grown step by step):
 //!   src/audio/      — cpal engine, mixer graph, real-time safe plumbing
@@ -9,12 +10,16 @@
 //!   src/constraints — creative constraints engine (no-undo, 3-track limit, ...)
 //!   src/plugins/    — CLAP / VST3 hosting
 
+mod decode;
+
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use decode::ClipData;
 use eframe::egui;
 
 // ---------------------------------------------------------------------------
@@ -33,18 +38,37 @@ const COL_CREAM: egui::Color32 = egui::Color32::from_rgb(0xE8, 0xDC, 0xC8);
 const COL_DIM: egui::Color32 = egui::Color32::from_rgb(0x7A, 0x6A, 0x5C);
 const COL_RED: egui::Color32 = egui::Color32::from_rgb(0xD4, 0x5A, 0x3C);
 
+// Timeline geometry
+const RULER_H: f32 = 26.0;
+const TRACK_H: f32 = 92.0;
+const LANE_GAP: f32 = 6.0;
+
+// ---------------------------------------------------------------------------
+// Clips
+// ---------------------------------------------------------------------------
+
+/// A decoded clip placed on the grid-free timeline.
+#[derive(Clone)]
+struct PlacedClip {
+    data: Arc<ClipData>,
+    lane: usize,
+    /// Timeline position in seconds (no grid, no snapping).
+    start: f32,
+}
+
 // ---------------------------------------------------------------------------
 // UI -> audio thread commands (lock-free ring buffer, no allocation)
 // ---------------------------------------------------------------------------
 
 const CMD_QUEUE: usize = 128;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 enum Command {
     Play,
     Stop,
     SetGain(f32),
     SetTone(bool),
+    SetClips(Vec<PlacedClip>),
 }
 
 /// State shared between the audio callback and the UI.
@@ -52,7 +76,7 @@ enum Command {
 /// Only atomics: the audio thread never blocks, never allocates, never locks.
 #[derive(Default)]
 struct Shared {
-    gain: AtomicU32,        // f32 bits
+    gain: AtomicU32,         // f32 bits
     playing: AtomicBool,
     tone: AtomicBool,
     track_frames: AtomicU64, // transport position in frames
@@ -126,9 +150,15 @@ impl AudioEngine {
             let (producer, consumer) = rtrb::RingBuffer::<Command>::new(CMD_QUEUE);
 
             let built = match sample_format {
-                cpal::SampleFormat::F32 => build_stream::<f32>(&device, &config, shared.clone(), consumer),
-                cpal::SampleFormat::I16 => build_stream::<i16>(&device, &config, shared.clone(), consumer),
-                cpal::SampleFormat::U16 => build_stream::<u16>(&device, &config, shared.clone(), consumer),
+                cpal::SampleFormat::F32 => {
+                    build_stream::<f32>(&device, &config, shared.clone(), consumer)
+                }
+                cpal::SampleFormat::I16 => {
+                    build_stream::<i16>(&device, &config, shared.clone(), consumer)
+                }
+                cpal::SampleFormat::U16 => {
+                    build_stream::<u16>(&device, &config, shared.clone(), consumer)
+                }
                 other => {
                     last_err = Some(format!("unsupported sample format: {other:?}"));
                     continue;
@@ -192,6 +222,9 @@ where
     let mut tone = shared.tone.load(Ordering::Relaxed);
     let mut phase = 0.0f32;
     let mut frames = 0u64;
+    // Snapshot of the placed clips, owned by the audio thread. Replaced only
+    // when the UI sends a new list (a move, no lock, no allocation here).
+    let mut clips: Vec<PlacedClip> = Vec::new();
 
     let err_shared = shared.clone();
 
@@ -208,6 +241,7 @@ where
                     }
                     Command::SetGain(g) => gain_target = g.clamp(0.0, 2.0),
                     Command::SetTone(on) => tone = on,
+                    Command::SetClips(list) => clips = list,
                 }
             }
 
@@ -218,15 +252,38 @@ where
                 gain_current += (gain_target - gain_current) * 0.0015;
 
                 let mut sample = 0.0f32;
-                if playing && tone {
-                    phase += tone_step;
-                    if phase >= 1.0 {
-                        phase -= 1.0;
+                if playing {
+                    let t = frames as f32 / sample_rate;
+
+                    // Reference tone (useful to check the output path).
+                    if tone {
+                        phase += tone_step;
+                        if phase >= 1.0 {
+                            phase -= 1.0;
+                        }
+                        sample += (phase * std::f32::consts::TAU).sin() * 0.125;
                     }
-                    sample = (phase * std::f32::consts::TAU).sin() * 0.125;
+
+                    // Mix every clip that covers the current timeline moment.
+                    for clip in &clips {
+                        let local = t - clip.start;
+                        if local < 0.0 || local >= clip.data.duration {
+                            continue;
+                        }
+                        let src_rate = clip.data.sample_rate.max(1) as f32;
+                        let pos = local * src_rate;
+                        let i = pos as usize;
+                        if i + 1 >= clip.data.samples.len() {
+                            continue;
+                        }
+                        let frac = pos - i as f32;
+                        let s0 = clip.data.samples[i];
+                        let s1 = clip.data.samples[i + 1];
+                        sample += (s0 + (s1 - s0) * frac) * 0.9;
+                    }
                 }
 
-                let out = sample * gain_current;
+                let out = (sample * gain_current).clamp(-1.0, 1.0);
                 let abs = out.abs();
                 if abs > peak {
                     peak = abs;
@@ -271,6 +328,9 @@ struct LosAngelesApp {
 
     zoom: f32,   // pixels per second
     scroll: f32, // leftmost visible second
+
+    clips: Vec<PlacedClip>,
+    notice: Option<String>,
 }
 
 impl LosAngelesApp {
@@ -290,6 +350,8 @@ impl LosAngelesApp {
             meter: 0.0,
             zoom: 90.0,
             scroll: 0.0,
+            clips: Vec::new(),
+            notice: None,
         };
         app.init_audio();
         app
@@ -300,6 +362,7 @@ impl LosAngelesApp {
             Ok(mut engine) => {
                 engine.send(Command::SetGain(self.gain));
                 engine.send(Command::SetTone(self.tone));
+                engine.send(Command::SetClips(self.clips.clone()));
                 self.engine = Some(engine);
                 self.engine_error = None;
             }
@@ -334,6 +397,40 @@ impl LosAngelesApp {
         if let Some(engine) = self.engine.as_mut() {
             engine.send(Command::SetTone(on));
         }
+    }
+
+    fn sync_clips(&mut self) {
+        if let Some(engine) = self.engine.as_mut() {
+            engine.send(Command::SetClips(self.clips.clone()));
+        }
+    }
+
+    /// Decode files and place them at `time` in `lane`, one after another.
+    fn add_files(&mut self, files: Vec<PathBuf>, lane: usize, time: f32) {
+        let mut t = time.max(0.0);
+        let lane = lane.min(TRACK_COUNT - 1);
+
+        for path in files {
+            match ClipData::decode(&path) {
+                Ok(data) => {
+                    let name = data.name.clone();
+                    let duration = data.duration;
+                    self.clips.push(PlacedClip {
+                        data: Arc::new(data),
+                        lane,
+                        start: t,
+                    });
+                    t += duration;
+                    self.notice = Some(format!("loaded {name} · {duration:.2}s"));
+                }
+                Err(e) => {
+                    self.notice = Some(format!("{}: {e}", path.display()));
+                }
+            }
+        }
+
+        self.sync_clips();
+        self.scroll = self.scroll.max(0.0);
     }
 
     fn position_seconds(&self) -> f32 {
@@ -419,43 +516,36 @@ impl LosAngelesApp {
                     }
 
                     // Peak meter
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(70.0, 8.0),
-                        egui::Sense::hover(),
-                    );
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(70.0, 8.0), egui::Sense::hover());
                     let painter = ui.painter();
                     painter.rect_filled(rect, egui::Rounding::same(2.0), COL_PANEL_HI);
                     let width = (rect.width() * self.meter.clamp(0.0, 1.0)).max(0.0);
                     if width > 0.0 {
-                        let bar = egui::Rect::from_min_size(
-                            rect.min,
-                            egui::vec2(width, rect.height()),
-                        );
+                        let bar =
+                            egui::Rect::from_min_size(rect.min, egui::vec2(width, rect.height()));
                         let color = if self.meter > 0.9 { COL_RED } else { COL_EMBER };
                         painter.rect_filled(bar, egui::Rounding::same(2.0), color);
                     }
 
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            let pos = self.position_seconds();
-                            let mins = (pos / 60.0).floor() as u32;
-                            let secs = pos - mins as f32 * 60.0;
-                            ui.label(
-                                egui::RichText::new(format!("{mins:02}:{secs:05.2}"))
-                                    .monospace()
-                                    .size(16.0)
-                                    .color(COL_CREAM),
-                            );
-                            ui.add_space(10.0);
-                            ui.label(
-                                egui::RichText::new("NO GRID")
-                                    .size(10.0)
-                                    .color(COL_EMBER)
-                                    .strong(),
-                            );
-                        },
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let pos = self.position_seconds();
+                        let mins = (pos / 60.0).floor() as u32;
+                        let secs = pos - mins as f32 * 60.0;
+                        ui.label(
+                            egui::RichText::new(format!("{mins:02}:{secs:05.2}"))
+                                .monospace()
+                                .size(16.0)
+                                .color(COL_CREAM),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("NO GRID")
+                                .size(10.0)
+                                .color(COL_EMBER)
+                                .strong(),
+                        );
+                    });
                 });
             });
     }
@@ -473,11 +563,7 @@ impl LosAngelesApp {
                     match &self.engine {
                         Some(engine) => {
                             let info = &engine.info;
-                            ui.label(
-                                egui::RichText::new("● AUDIO")
-                                    .size(10.0)
-                                    .color(COL_AMBER),
-                            );
+                            ui.label(egui::RichText::new("● AUDIO").size(10.0).color(COL_AMBER));
                             ui.add_space(8.0);
                             ui.label(
                                 egui::RichText::new(format!(
@@ -508,15 +594,11 @@ impl LosAngelesApp {
                         }
                         None => {
                             ui.label(
-                                egui::RichText::new("● AUDIO OFFLINE")
-                                    .size(10.0)
-                                    .color(COL_RED),
+                                egui::RichText::new("● AUDIO OFFLINE").size(10.0).color(COL_RED),
                             );
                             if let Some(err) = &self.engine_error {
                                 ui.add_space(8.0);
-                                ui.label(
-                                    egui::RichText::new(err).size(10.0).color(COL_DIM),
-                                );
+                                ui.label(egui::RichText::new(err).size(10.0).color(COL_DIM));
                             }
                             ui.add_space(8.0);
                             if ui.small_button("RETRY").clicked() {
@@ -525,16 +607,18 @@ impl LosAngelesApp {
                         }
                     }
 
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new("stage 1 · skeleton")
-                                    .size(10.0)
-                                    .color(COL_DIM),
-                            );
-                        },
-                    );
+                    if let Some(note) = &self.notice {
+                        ui.add_space(12.0);
+                        ui.label(egui::RichText::new(note).size(10.0).color(COL_EMBER));
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("stage 2 · audio files")
+                                .size(10.0)
+                                .color(COL_DIM),
+                        );
+                    });
                 });
             });
     }
@@ -552,10 +636,6 @@ impl LosAngelesApp {
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let rect = response.rect;
         painter.rect_filled(rect, egui::Rounding::ZERO, COL_BG);
-
-        const RULER_H: f32 = 26.0;
-        const TRACK_H: f32 = 92.0;
-        const GAP: f32 = 6.0;
 
         // -- zoom / pan ----------------------------------------------------
         if let Some(hover) = response.hover_pos() {
@@ -575,6 +655,30 @@ impl LosAngelesApp {
         }
         self.scroll = self.scroll.max(0.0);
 
+        let lanes_top = rect.top() + RULER_H + 8.0;
+
+        // -- drag & drop from Explorer -------------------------------------
+        let (dropped, pointer, hovering_files) = ui.input(|i| {
+            let files: Vec<PathBuf> = i
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect();
+            (
+                files,
+                i.pointer.hover_pos().or_else(|| i.pointer.interact_pos()),
+                !i.raw.hovered_files.is_empty(),
+            )
+        });
+
+        if !dropped.is_empty() {
+            let pos = pointer.unwrap_or(rect.center());
+            let lane = (((pos.y - lanes_top) / (TRACK_H + LANE_GAP)).floor().max(0.0)) as usize;
+            let time = (self.scroll + (pos.x - rect.left()) / self.zoom).max(0.0);
+            self.add_files(dropped, lane, time);
+        }
+
         // -- ruler ---------------------------------------------------------
         let ruler = egui::Rect::from_min_max(
             egui::pos2(rect.left(), rect.top()),
@@ -590,14 +694,22 @@ impl LosAngelesApp {
             if t >= 0.0 {
                 let x = rect.left() + (t - self.scroll) * self.zoom;
                 painter.line_segment(
-                    [egui::pos2(x, ruler.bottom() - 8.0), egui::pos2(x, ruler.bottom())],
+                    [
+                        egui::pos2(x, ruler.bottom() - 8.0),
+                        egui::pos2(x, ruler.bottom()),
+                    ],
                     egui::Stroke::new(1.0, COL_DIM),
                 );
                 let label = if step < 1.0 {
                     format!("{t:.2}s")
                 } else {
                     let secs = t as i64;
-                    format!("{}:{:02}.{:01}", secs / 60, secs % 60, ((t - secs as f32) * 10.0) as i32)
+                    format!(
+                        "{}:{:02}.{:01}",
+                        secs / 60,
+                        secs % 60,
+                        ((t - secs as f32) * 10.0) as i32
+                    )
                 };
                 painter.text(
                     egui::pos2(x + 4.0, ruler.top() + 4.0),
@@ -612,7 +724,7 @@ impl LosAngelesApp {
 
         // -- tracks --------------------------------------------------------
         for i in 0..TRACK_COUNT {
-            let top = rect.top() + RULER_H + 8.0 + i as f32 * (TRACK_H + GAP);
+            let top = lanes_top + i as f32 * (TRACK_H + LANE_GAP);
             if top > rect.bottom() {
                 break;
             }
@@ -631,7 +743,6 @@ impl LosAngelesApp {
                 egui::Stroke::new(1.0, COL_GRID),
             );
 
-            // second lines, just for orientation (no musical grid on purpose)
             painter.text(
                 egui::pos2(lane.left() + 10.0, lane.top() + 6.0),
                 egui::Align2::LEFT_TOP,
@@ -639,19 +750,67 @@ impl LosAngelesApp {
                 egui::FontId::proportional(11.0),
                 COL_DIM,
             );
-            painter.text(
-                lane.center(),
-                egui::Align2::CENTER_CENTER,
-                "drag audio files here  (stage 2)",
-                egui::FontId::proportional(12.0),
-                COL_GRID,
+
+            if !self.clips.iter().any(|c| c.lane == i) {
+                painter.text(
+                    lane.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "drop .wav / .mp3 / .ogg here",
+                    egui::FontId::proportional(12.0),
+                    COL_GRID,
+                );
+            }
+
+            // -- clips with waveform --------------------------------------
+            for clip in self.clips.iter().filter(|c| c.lane == i) {
+                let x0 = lane.left() + (clip.start - self.scroll) * self.zoom;
+                let x1 = x0 + clip.data.duration * self.zoom;
+                if x1 < lane.left() || x0 > lane.right() {
+                    continue;
+                }
+                let visible = egui::Rect::from_min_max(
+                    egui::pos2(x0.max(lane.left()), lane.top() + 20.0),
+                    egui::pos2(x1.min(lane.right()), lane.bottom() - 6.0),
+                );
+                if visible.width() < 1.0 {
+                    continue;
+                }
+
+                painter.rect_filled(visible, egui::Rounding::same(3.0), COL_PANEL_HI);
+                painter.rect_stroke(
+                    visible,
+                    egui::Rounding::same(3.0),
+                    egui::Stroke::new(1.0, COL_EMBER),
+                );
+
+                let wave = visible.shrink2(egui::vec2(1.0, 4.0));
+                draw_waveform(&painter, wave, &clip.data.peaks, x0, x1, clip.data.duration);
+
+                painter.text(
+                    egui::pos2(visible.left() + 6.0, lane.top() + 4.0),
+                    egui::Align2::LEFT_TOP,
+                    format!(
+                        "{} · {:.2}s · {:.0} kHz",
+                        clip.data.name,
+                        clip.data.duration,
+                        clip.data.sample_rate as f32 / 1000.0
+                    ),
+                    egui::FontId::proportional(10.0),
+                    COL_CREAM,
+                );
+            }
+        }
+
+        // -- drop highlight ------------------------------------------------
+        if hovering_files {
+            let highlight = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 2.0, lanes_top - 4.0),
+                egui::pos2(rect.right() - 2.0, rect.bottom() - 24.0),
             );
-            painter.line_segment(
-                [
-                    egui::pos2(lane.left(), lane.center().y),
-                    egui::pos2(lane.right(), lane.center().y),
-                ],
-                egui::Stroke::new(1.0, COL_GRID),
+            painter.rect_stroke(
+                highlight,
+                egui::Rounding::same(4.0),
+                egui::Stroke::new(1.5, COL_AMBER),
             );
         }
 
@@ -671,8 +830,10 @@ impl LosAngelesApp {
             egui::pos2(rect.left() + 12.0, rect.bottom() - 16.0),
             egui::Align2::LEFT_BOTTOM,
             format!(
-                "zoom {:.0} px/s   ·   scroll {:.2}s   ·   wheel = zoom, alt+drag / middle-drag = pan   ·   space = play",
-                self.zoom, self.scroll
+                "zoom {:.0} px/s   ·   scroll {:.2}s   ·   wheel = zoom, alt+drag / middle-drag = pan   ·   space = play   ·   {} clip(s)",
+                self.zoom,
+                self.scroll,
+                self.clips.len()
             ),
             egui::FontId::proportional(10.0),
             COL_DIM,
@@ -684,6 +845,38 @@ impl LosAngelesApp {
             self.set_playing(!self.playing);
         }
     }
+}
+
+/// Draw a peak waveform for a clip, honouring partial visibility.
+fn draw_waveform(
+    painter: &egui::Painter,
+    area: egui::Rect,
+    peaks: &[f32],
+    clip_x0: f32,
+    clip_x1: f32,
+    duration: f32,
+) {
+    if peaks.is_empty() || area.width() < 1.0 || clip_x1 <= clip_x0 {
+        return;
+    }
+    let mid = area.center().y;
+    let half = area.height() * 0.48;
+    let cols = area.width().ceil() as usize;
+    let mut shapes = Vec::with_capacity(cols.min(4096));
+
+    for c in 0..cols {
+        let x = area.left() + c as f32 + 0.5;
+        let frac = ((x - clip_x0) / (clip_x1 - clip_x0)).clamp(0.0, 1.0);
+        let idx = ((frac * peaks.len() as f32) as usize).min(peaks.len() - 1);
+        let p = peaks[idx].clamp(0.0, 1.0);
+        let h = (p * half).max(0.4);
+        shapes.push(egui::Shape::line_segment(
+            [egui::pos2(x, mid - h), egui::pos2(x, mid + h)],
+            egui::Stroke::new(1.0, COL_AMBER),
+        ));
+    }
+    let _ = duration;
+    painter.extend(shapes);
 }
 
 impl eframe::App for LosAngelesApp {
