@@ -37,6 +37,7 @@ use tracks::{EffectKind, PlacedClip, PluginInst, Track, TRACK_COLORS};
 // Timeline geometry
 const RULER_H: f32 = 26.0;
 const TRACK_H: f32 = 92.0;
+const LANE_GAP: f32 = 2.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BrowserTab {
@@ -67,8 +68,9 @@ struct LosAngelesApp {
     gain: f32,
     meter: f32,
 
-    zoom: f32,   // pixels per second
-    scroll: f32, // leftmost visible second
+    zoom: f32,    // pixels per second
+    scroll: f32,  // leftmost visible second
+    vscroll: f32, // vertical track scroll in pixels
 
     tracks: Vec<Track>,
     selected: usize,
@@ -121,6 +123,7 @@ impl LosAngelesApp {
             meter: 0.0,
             zoom: 90.0,
             scroll: 0.0,
+            vscroll: 0.0,
             tracks,
             selected: 0,
             clips: Vec::new(),
@@ -1579,9 +1582,12 @@ impl LosAngelesApp {
             return None;
         }
 
-        let mut ui = ui.child_ui(inner, egui::Layout::top_down(egui::Align::Min), None);
         let color = self.tracks[i].color;
-
+        let mut ui = ui.allocate_new_ui(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| {
         ui.horizontal(|ui| {
             if ui
                 .add(
@@ -1615,7 +1621,7 @@ impl LosAngelesApp {
         let mut vol = self.tracks[i].volume;
         let slider = egui::Slider::new(&mut vol, 0.0..=1.5)
             .show_value(false)
-            .desired_width(inner.width() - 64.0);
+            .desired_width((inner.width() - 64.0).max(40.0));
         if ui.add(slider).changed() {
             self.tracks[i].volume = vol;
             action = Some(HeaderAction::Mix);
@@ -1640,6 +1646,8 @@ impl LosAngelesApp {
                     .color(theme.dim),
             );
         });
+            },
+        );
 
         action
     }
