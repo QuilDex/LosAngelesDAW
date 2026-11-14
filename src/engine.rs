@@ -51,6 +51,22 @@ pub struct MixSnapshot {
     pub notes: Vec<PlacedNote>,
 }
 
+/// Позиция превью-плейхеда (длится до следующего события).
+#[derive(Clone, Copy, Default)]
+pub struct Preview {
+    pub time: f32,
+}
+
+pub enum Command {
+    Play,
+    Stop,
+    SetGain(f32),
+    SetTone(bool),
+    SetMix(Box<MixSnapshot>),
+    Preview(Option<f32>), // Some(t) = сыграть preview, None = stop preview
+    SetPreview(Box<Preview>), // позиция preview в секундах
+}
+
 pub enum Command {
     Play,
     Stop,
