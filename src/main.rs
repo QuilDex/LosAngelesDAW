@@ -412,11 +412,7 @@ impl LosAngelesApp {
                     ui.label(egui::RichText::new("MASTER").size(10.0).color(COL_DIM));
                     let mut gain = self.gain;
                     if ui
-                        .add(
-                            egui::Slider::new(&mut gain, 0.0..=1.2)
-                                .show_value(false)
-                                .trailing_fill(true),
-                        )
+                        .add(egui::Slider::new(&mut gain, 0.0..=1.2).show_value(false))
                         .changed()
                     {
                         self.set_gain(gain);
@@ -726,7 +722,6 @@ fn install_theme(ctx: &egui::Context) {
     visuals.hyperlink_color = COL_AMBER;
     visuals.selection.bg_fill = COL_EMBER;
     visuals.selection.stroke = egui::Stroke::new(1.0, COL_CREAM);
-    visuals.slider_trailing_fill = true;
 
     let w = &mut visuals.widgets;
     w.noninteractive.bg_fill = COL_PANEL;
