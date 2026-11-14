@@ -251,7 +251,7 @@ impl PianoRoll {
             );
             painter.line_segment(
                 [row.left_bottom(), row.right_bottom()],
-                egui::Stroke::new(1.0, theme.grid.gamma_multiply(0.6)),
+                egui::Stroke::new(1.0_f32, theme.grid.gamma_multiply(0.6)),
             );
             if p % 12 == 0 {
                 painter.text(
@@ -287,7 +287,7 @@ impl PianoRoll {
                     egui::pos2(grid_rect.left(), y + ROW_H),
                     egui::pos2(grid_rect.right(), y + ROW_H),
                 ],
-                egui::Stroke::new(1.0, theme.grid.gamma_multiply(0.55)),
+                egui::Stroke::new(1.0_f32, theme.grid.gamma_multiply(0.55)),
             );
         }
 
@@ -318,7 +318,7 @@ impl PianoRoll {
                         egui::pos2(x, grid_rect.bottom()),
                     ],
                     egui::Stroke::new(
-                        1.0,
+                        1.0_f32,
                         if strong {
                             theme.grid
                         } else {
@@ -357,7 +357,7 @@ impl PianoRoll {
                 egui::Rounding::same(2.0),
                 fill.gamma_multiply(0.35 + 0.65 * n.vel.clamp(0.0, 1.0)),
             );
-            gp.rect_stroke(r, egui::Rounding::same(2.0), egui::Stroke::new(1.0, fill));
+            gp.rect_stroke(r, egui::Rounding::same(2.0), egui::Stroke::new(1.0_f32, fill));
             if r.width() > 34.0 {
                 gp.text(
                     r.left_center() + egui::vec2(4.0, 0.0),
@@ -377,7 +377,7 @@ impl PianoRoll {
                     egui::pos2(px, grid_rect.top()),
                     egui::pos2(px, grid_rect.bottom()),
                 ],
-                egui::Stroke::new(1.2, theme.accent),
+                egui::Stroke::new(1.2_f32, theme.accent),
             );
         }
 

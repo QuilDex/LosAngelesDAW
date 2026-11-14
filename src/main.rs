@@ -1317,7 +1317,7 @@ impl LosAngelesApp {
                 painter.rect_filled(ruler, egui::Rounding::ZERO, theme.panel);
                 painter.line_segment(
                     [ruler.left_bottom(), ruler.right_bottom()],
-                    egui::Stroke::new(1.0, theme.grid),
+                    egui::Stroke::new(1.0_f32, theme.grid),
                 );
 
                 let step = {
@@ -1337,7 +1337,7 @@ impl LosAngelesApp {
                                     egui::pos2(x, ruler.top() + 14.0),
                                     egui::pos2(x, ruler.bottom()),
                                 ],
-                                egui::Stroke::new(1.0, theme.grid),
+                                egui::Stroke::new(1.0_f32, theme.grid),
                             );
                             painter.text(
                                 egui::pos2(x + 4.0, ruler.top() + 3.0),
@@ -1385,7 +1385,7 @@ impl LosAngelesApp {
                             egui::pos2(row.left() + head_w, row.top()),
                             egui::pos2(row.left() + head_w, row.bottom()),
                         ],
-                        egui::Stroke::new(1.0, theme.grid),
+                        egui::Stroke::new(1.0_f32, theme.grid),
                     );
 
                     if let Some(action) = self.track_header(ui, &theme, i, row, head_w) {
@@ -1416,7 +1416,7 @@ impl LosAngelesApp {
                         painter.rect_stroke(
                             visible,
                             egui::Rounding::same(3.0),
-                            egui::Stroke::new(1.0, color.gamma_multiply(0.9)),
+                            egui::Stroke::new(1.0_f32, color.gamma_multiply(0.9)),
                         );
                         // Name plate.
                         painter.text(
@@ -1444,7 +1444,7 @@ impl LosAngelesApp {
                                         egui::pos2(x, mid - amp * half),
                                         egui::pos2(x, mid + amp * half),
                                     ],
-                                    egui::Stroke::new(1.0, color.gamma_multiply(0.95)),
+                                    egui::Stroke::new(1.0_f32, color.gamma_multiply(0.95)),
                                 );
                             }
                         }
@@ -1459,7 +1459,7 @@ impl LosAngelesApp {
                             egui::pos2(px, ruler.top()),
                             egui::pos2(px, rect.bottom()),
                         ],
-                        egui::Stroke::new(1.4, theme.accent),
+                        egui::Stroke::new(1.4_f32, theme.accent),
                     );
                 }
 
@@ -1583,11 +1583,10 @@ impl LosAngelesApp {
         }
 
         let color = self.tracks[i].color;
-        let mut ui = ui.allocate_new_ui(
-            egui::UiBuilder::new()
-                .max_rect(inner)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| {
+        let mut ui = ui.child_ui(
+            inner,
+            egui::Layout::top_down(egui::Align::Min),
+        );
         ui.horizontal(|ui| {
             if ui
                 .add(
@@ -1646,8 +1645,6 @@ impl LosAngelesApp {
                     .color(theme.dim),
             );
         });
-            },
-        );
 
         action
     }
