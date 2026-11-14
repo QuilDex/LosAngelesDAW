@@ -1011,5 +1011,687 @@ impl LosAngelesApp {
         );
     }
 }
-// __PART_C__
+impl LosAngelesApp {
+    // -- bottom panel: piano roll + effects ---------------------------------
+
+    fn bottom_panel(&mut self, ctx: &egui::Context) {
+        if self.bottom == Bottom::Closed {
+            return;
+        }
+        let theme = self.theme.clone();
+        let mut close = false;
+
+        egui::TopBottomPanel::bottom("bottom")
+            .resizable(true)
+            .default_height(if self.bottom == Bottom::Piano { 240.0 } else { 190.0 })
+            .min_height(120.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(theme.panel)
+                    .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
+            )
+            .show(ctx, |ui| {
+                let sel = self.selected.min(self.tracks.len().saturating_sub(1));
+                let title = self
+                    .tracks
+                    .get(sel)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(match self.bottom {
+                            Bottom::Piano => "PIANO ROLL",
+                            _ => "TRACK FX / PLUGINS",
+                        })
+                        .size(10.0)
+                        .strong()
+                        .color(theme.accent),
+                    );
+                    ui.label(egui::RichText::new(title).size(10.0).color(theme.dim));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("x").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+                match self.bottom {
+                    Bottom::Piano => self.piano_panel(ui, &theme),
+                    _ => self.fx_panel(ui, &theme),
+                }
+            });
+
+        if close {
+            self.bottom = Bottom::Closed;
+        }
+    }
+
+    fn piano_panel(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        if self.tracks.is_empty() {
+            return;
+        }
+        let sel = self.selected.min(self.tracks.len() - 1);
+        if self.roll_track != sel {
+            self.roll_track = sel;
+            self.roll.notes = self.tracks[sel].notes.clone();
+        }
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("snap").size(9.0).color(theme.dim));
+            for (label, step) in [("1/32", 0.0625f32), ("1/16", 0.125), ("1/8", 0.25), ("1/4", 0.5)] {
+                if ui
+                    .selectable_label((self.roll.grid - step).abs() < 1e-4, label)
+                    .clicked()
+                {
+                    self.roll.grid = step;
+                }
+            }
+            if ui
+                .selectable_label(self.roll.grid <= 0.0, "off")
+                .clicked()
+            {
+                self.roll.grid = 0.0;
+            }
+            if ui.small_button("clear").clicked() {
+                self.roll.notes.clear();
+                self.roll.changed = true;
+            }
+            ui.label(
+                egui::RichText::new("click adds · drag moves · right-click deletes · alt = free")
+                    .size(9.0)
+                    .color(theme.dim),
+            );
+        });
+
+        self.roll.changed = false;
+        let playhead = self.position_seconds();
+        self.roll.show(ui, theme, playhead);
+        if self.roll.changed {
+            self.tracks[sel].notes = self.roll.notes.clone();
+            self.sync_mix();
+            self.dirty = true;
+        }
+    }
+
+    fn fx_panel(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        if self.tracks.is_empty() {
+            return;
+        }
+        let sel = self.selected.min(self.tracks.len() - 1);
+        let mut changed = false;
+        let mut remove_effect: Option<usize> = None;
+        let mut remove_plugin: Option<usize> = None;
+        let mut add_effect: Option<EffectKind> = None;
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for kind in EffectKind::ALL {
+                        if ui.small_button(format!("+ {}", kind.label())).clicked() {
+                            add_effect = Some(kind);
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+
+                let track = &mut self.tracks[sel];
+                for (i, fx) in track.effects.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut fx.enabled, "").changed() {
+                            changed = true;
+                        }
+                        ui.label(
+                            egui::RichText::new(fx.kind.label())
+                                .size(11.0)
+                                .color(theme.accent),
+                        );
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut fx.amount, 0.0..=1.0)
+                                    .show_value(false)
+                                    .desired_width(130.0),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("{:.0}%", fx.amount * 100.0))
+                                .size(9.0)
+                                .color(theme.dim),
+                        );
+                        if ui.small_button("x").clicked() {
+                            remove_effect = Some(i);
+                        }
+                    });
+                }
+
+                if !track.plugins.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("PLUGIN CHAIN").size(9.0).color(theme.dim));
+                }
+                for (i, pl) in track.plugins.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut pl.enabled, "").changed() {
+                            changed = true;
+                        }
+                        ui.label(
+                            egui::RichText::new(pl.kind.label())
+                                .size(9.0)
+                                .monospace()
+                                .color(theme.accent_hot),
+                        );
+                        ui.label(egui::RichText::new(&pl.name).size(11.0).color(theme.cream));
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut pl.wet, 0.0..=1.0)
+                                    .show_value(false)
+                                    .desired_width(90.0),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        if ui.small_button("x").clicked() {
+                            remove_plugin = Some(i);
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(format!("   {}", pl.path.display()))
+                            .size(8.0)
+                            .color(theme.dim),
+                    );
+                }
+
+                if track.effects.is_empty() && track.plugins.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "no effects yet — add one above, or pick a CLAP / VST3 / VST in the left browser",
+                        )
+                        .size(10.0)
+                        .color(theme.dim),
+                    );
+                }
+            });
+
+        if let Some(kind) = add_effect {
+            self.tracks[sel].effects.push(tracks::Effect::new(kind));
+            changed = true;
+        }
+        if let Some(i) = remove_effect {
+            self.tracks[sel].effects.remove(i);
+            changed = true;
+        }
+        if let Some(i) = remove_plugin {
+            self.tracks[sel].plugins.remove(i);
+            changed = true;
+        }
+        if changed {
+            self.sync_mix();
+            self.dirty = true;
+        }
+    }
+}
+impl LosAngelesApp {
+    // -- timeline ----------------------------------------------------------
+
+    fn time_to_x(&self, rect: &egui::Rect, t: f32) -> f32 {
+        rect.left() + (t - self.scroll) * self.zoom
+    }
+
+    fn x_to_time(&self, rect: &egui::Rect, x: f32) -> f32 {
+        self.scroll + (x - rect.left()) / self.zoom.max(1.0)
+    }
+
+    fn track_at_y(&self, y: f32) -> Option<usize> {
+        if y < RULER_H {
+            return None;
+        }
+        let local = y - RULER_H + self.vscroll;
+        let idx = (local / (TRACK_H + LANE_GAP)).floor() as usize;
+        if idx < self.tracks.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    fn timeline(&mut self, ctx: &egui::Context) {
+        let theme = self.theme.clone();
+        let mut drop_files: Option<(Vec<PathBuf>, usize, f32)> = None;
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(theme.bg))
+            .show(ctx, |ui| {
+                let rect = ui.available_rect_before_wrap();
+                let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                let painter = ui.painter_at(rect);
+
+                let head_w = 176.0_f32.min(rect.width() * 0.45);
+                let lane_rect = egui::Rect::from_min_max(
+                    egui::pos2(rect.left() + head_w, rect.top() + RULER_H),
+                    rect.max,
+                );
+
+                // Scroll / zoom.
+                if let Some(hp) = resp.hover_pos() {
+                    let (dy, dx, ctrl, shift) = ui.input(|i| {
+                        (
+                            i.smooth_scroll_delta.y,
+                            i.smooth_scroll_delta.x,
+                            i.modifiers.ctrl || i.modifiers.command,
+                            i.modifiers.shift,
+                        )
+                    });
+                    if ctrl && dy.abs() > 0.1 {
+                        let anchor = self.x_to_time(&lane_rect, hp.x);
+                        self.zoom = (self.zoom * (dy * 0.004).exp()).clamp(8.0, 4000.0);
+                        self.scroll = anchor - (hp.x - lane_rect.left()) / self.zoom;
+                    } else if shift && dy.abs() > 0.1 {
+                        self.scroll -= dy / self.zoom;
+                    } else {
+                        if dy.abs() > 0.1 {
+                            self.vscroll -= dy;
+                        }
+                        if dx.abs() > 0.1 {
+                            self.scroll -= dx / self.zoom;
+                        }
+                    }
+                }
+                self.scroll = self.scroll.max(0.0);
+                let max_scroll = (self.tracks.len() as f32 * (TRACK_H + LANE_GAP) - lane_rect.height())
+                    .max(0.0);
+                self.vscroll = self.vscroll.clamp(0.0, max_scroll);
+
+                // Ruler + lane backgrounds.
+                let ruler = egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), rect.top()),
+                    egui::pos2(rect.right(), rect.top() + RULER_H),
+                );
+                painter.rect_filled(ruler, egui::Rounding::ZERO, theme.panel);
+                painter.line_segment(
+                    [ruler.left_bottom(), ruler.right_bottom()],
+                    egui::Stroke::new(1.0, theme.grid),
+                );
+
+                let step = {
+                    let mut s = 1.0f32;
+                    while s * self.zoom < 60.0 {
+                        s *= 2.0;
+                    }
+                    s
+                };
+                let mut t = (self.scroll / step).floor() * step;
+                while t <= self.scroll + lane_rect.width() / self.zoom {
+                    if t >= 0.0 {
+                        let x = self.time_to_x(&lane_rect, t);
+                        if x >= lane_rect.left() {
+                            painter.line_segment(
+                                [
+                                    egui::pos2(x, ruler.top() + 14.0),
+                                    egui::pos2(x, ruler.bottom()),
+                                ],
+                                egui::Stroke::new(1.0, theme.grid),
+                            );
+                            painter.text(
+                                egui::pos2(x + 4.0, ruler.top() + 3.0),
+                                egui::Align2::LEFT_TOP,
+                                format!("{t:.0}s"),
+                                egui::FontId::proportional(9.0),
+                                theme.dim,
+                            );
+                        }
+                    }
+                    t += step;
+                }
+
+                // Tracks.
+                let mut header_actions: Vec<(usize, HeaderAction)> = Vec::new();
+                for i in 0..self.tracks.len() {
+                    let top = RULER_H + i as f32 * (TRACK_H + LANE_GAP) - self.vscroll;
+                    if top + TRACK_H < RULER_H || top > rect.height() {
+                        continue;
+                    }
+                    let row = egui::Rect::from_min_max(
+                        egui::pos2(rect.left(), rect.top() + top),
+                        egui::pos2(rect.right(), rect.top() + top + TRACK_H),
+                    );
+                    let selected = i == self.selected;
+                    let lane_fill = if i % 2 == 0 { theme.lane } else { theme.lane_alt };
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(row.left() + head_w, row.top()),
+                            row.max,
+                        ),
+                        egui::Rounding::ZERO,
+                        lane_fill,
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            row.min,
+                            egui::pos2(row.left() + head_w, row.bottom()),
+                        ),
+                        egui::Rounding::ZERO,
+                        if selected { theme.panel_hi } else { theme.panel },
+                    );
+                    painter.line_segment(
+                        [
+                            egui::pos2(row.left() + head_w, row.top()),
+                            egui::pos2(row.left() + head_w, row.bottom()),
+                        ],
+                        egui::Stroke::new(1.0, theme.grid),
+                    );
+
+                    if let Some(action) = self.track_header(ui, &theme, i, row, head_w) {
+                        header_actions.push((i, action));
+                    }
+
+                    // Clips.
+                    for (ci, clip) in self.clips.iter().enumerate() {
+                        if clip.track != i {
+                            continue;
+                        }
+                        let x0 = self.time_to_x(&lane_rect, clip.start);
+                        let x1 = self.time_to_x(&lane_rect, clip.start + clip.data.duration);
+                        let visible = egui::Rect::from_min_max(
+                            egui::pos2(x0.max(lane_rect.left()), row.top() + 8.0),
+                            egui::pos2(x1.min(lane_rect.right()), row.bottom() - 8.0),
+                        );
+                        if visible.width() < 2.0 || visible.height() < 4.0 {
+                            continue;
+                        }
+                        let dragging = self.clip_drag.map(|d| d.idx == ci).unwrap_or(false);
+                        let color = self.tracks[i].color;
+                        painter.rect_filled(
+                            visible,
+                            egui::Rounding::same(3.0),
+                            color.gamma_multiply(if dragging { 0.45 } else { 0.28 }),
+                        );
+                        painter.rect_stroke(
+                            visible,
+                            egui::Rounding::same(3.0),
+                            egui::Stroke::new(1.0, color.gamma_multiply(0.9)),
+                        );
+                        // Name plate.
+                        painter.text(
+                            visible.left_top() + egui::vec2(5.0, 4.0),
+                            egui::Align2::LEFT_TOP,
+                            &clip.data.name,
+                            egui::FontId::proportional(10.0),
+                            theme.cream,
+                        );
+                        // Waveform.
+                        let peaks = &clip.data.peaks;
+                        if !peaks.is_empty() {
+                            let mid = visible.center().y + 4.0;
+                            let half = visible.height() * 0.30;
+                            let buckets = (visible.width() as usize).max(1);
+                            for b in 0..buckets {
+                                let p0 = b * peaks.len() / buckets;
+                                let p1 = ((b + 1) * peaks.len() / buckets).max(p0 + 1);
+                                let amp = peaks[p0.min(peaks.len() - 1)..p1.min(peaks.len())]
+                                    .iter()
+                                    .fold(0.0f32, |m, v| m.max(v.abs()));
+                                let x = visible.left() + b as f32;
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(x, mid - amp * half),
+                                        egui::pos2(x, mid + amp * half),
+                                    ],
+                                    egui::Stroke::new(1.0, color.gamma_multiply(0.95)),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Playhead.
+                let px = self.time_to_x(&lane_rect, self.position_seconds());
+                if px >= lane_rect.left() && px <= lane_rect.right() {
+                    painter.line_segment(
+                        [
+                            egui::pos2(px, ruler.top()),
+                            egui::pos2(px, rect.bottom()),
+                        ],
+                        egui::Stroke::new(1.4, theme.accent),
+                    );
+                }
+
+                // Clip drag + selection.
+                let pointer = resp.interact_pointer_pos();
+                if resp.drag_started_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = pointer {
+                        if lane_rect.contains(pos) {
+                            let time = self.x_to_time(&lane_rect, pos.x);
+                            let mut hit = None;
+                            for (ci, clip) in self.clips.iter().enumerate() {
+                                let same_track =
+                                    self.track_at_y(pos.y).map(|t| t == clip.track).unwrap_or(false);
+                                if same_track
+                                    && time >= clip.start
+                                    && time <= clip.start + clip.data.duration
+                                {
+                                    hit = Some((ci, time - clip.start));
+                                }
+                            }
+                            if let Some((idx, offset)) = hit {
+                                self.clip_drag = Some(ClipDrag { idx, offset });
+                            }
+                        }
+                    }
+                }
+                if resp.dragged() {
+                    if let (Some(drag), Some(pos)) = (self.clip_drag, pointer) {
+                        let time = (self.x_to_time(&lane_rect, pos.x) - drag.offset).max(0.0);
+                        let track = self
+                            .track_at_y(pos.y)
+                            .unwrap_or(self.clips[drag.idx].track);
+                        if let Some(clip) = self.clips.get_mut(drag.idx) {
+                            clip.start = time;
+                            clip.track = track;
+                            self.dirty = true;
+                        }
+                    }
+                }
+                if resp.drag_stopped() {
+                    if self.clip_drag.is_some() {
+                        self.clip_drag = None;
+                        self.sync_mix();
+                    }
+                }
+                if resp.clicked() {
+                    if let (Some(pos), true) = (pointer, self.clip_drag.is_none()) {
+                        if lane_rect.contains(pos) {
+                            if let Some(t) = self.track_at_y(pos.y) {
+                                self.select_track(t);
+                            }
+                        }
+                    }
+                }
+
+                // Files dropped from the OS.
+                let dropped: Vec<PathBuf> = ui.input(|i| {
+                    i.raw
+                        .dropped_files
+                        .iter()
+                        .filter_map(|f| f.path.clone())
+                        .collect()
+                });
+                if !dropped.is_empty() {
+                    let hover = ui.input(|i| i.pointer.hover_pos()).unwrap_or(lane_rect.center());
+                    let track = self.track_at_y(hover.y).unwrap_or(self.selected);
+                    let time = self
+                        .x_to_time(&lane_rect, hover.x.clamp(lane_rect.left(), lane_rect.right()))
+                        .max(0.0);
+                    drop_files = Some((dropped, track, time));
+                }
+
+                if self.playing {
+                    ui.ctx().request_repaint_after(Duration::from_millis(16));
+                }
+
+                for (i, action) in header_actions {
+                    match action {
+                        HeaderAction::Select => self.select_track(i),
+                        HeaderAction::Remove => {
+                            self.remove_track(i);
+                            self.sync_mix();
+                        }
+                        HeaderAction::Mix => {
+                            self.dirty = true;
+                            self.sync_mix();
+                        }
+                        HeaderAction::OpenFx => {
+                            self.selected = i;
+                            self.bottom = Bottom::Fx;
+                        }
+                        HeaderAction::OpenPiano => {
+                            self.selected = i;
+                            self.roll_track = usize::MAX;
+                            self.bottom = Bottom::Piano;
+                        }
+                    }
+                }
+            });
+
+        if let Some((files, track, time)) = drop_files {
+            self.add_files_at(files, track, time);
+        }
+    }
+
+    fn track_header(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &Theme,
+        i: usize,
+        row: egui::Rect,
+        head_w: f32,
+    ) -> Option<HeaderAction> {
+        let mut action = None;
+        let inner = egui::Rect::from_min_max(
+            egui::pos2(row.left() + 6.0, row.top() + 4.0),
+            egui::pos2(row.left() + head_w - 6.0, row.bottom() - 4.0),
+        );
+        if inner.width() < 40.0 {
+            return None;
+        }
+
+        let mut ui = ui.child_ui(inner, egui::Layout::top_down(egui::Align::Min), None);
+        let color = self.tracks[i].color;
+
+        ui.horizontal(|ui| {
+            if ui
+                .add(
+                    egui::Label::new(
+                        egui::RichText::new(&self.tracks[i].name).size(11.0).color(color),
+                    )
+                    .sense(egui::Sense::click()),
+                )
+                .clicked()
+            {
+                action = Some(HeaderAction::Select);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("x").on_hover_text("delete track").clicked() {
+                    action = Some(HeaderAction::Remove);
+                }
+                if ui.small_button("fx").clicked() {
+                    action = Some(HeaderAction::OpenFx);
+                }
+                let notes = self.tracks[i].notes.len();
+                if ui
+                    .small_button("pno")
+                    .on_hover_text(format!("piano roll · {notes} note(s)"))
+                    .clicked()
+                {
+                    action = Some(HeaderAction::OpenPiano);
+                }
+            });
+        });
+
+        let mut vol = self.tracks[i].volume;
+        let slider = egui::Slider::new(&mut vol, 0.0..=1.5)
+            .show_value(false)
+            .desired_width(inner.width() - 64.0);
+        if ui.add(slider).changed() {
+            self.tracks[i].volume = vol;
+            action = Some(HeaderAction::Mix);
+        }
+
+        ui.horizontal(|ui| {
+            let muted = self.tracks[i].muted;
+            if ui.small_button(if muted { "M!" } else { "M " }).clicked() {
+                self.tracks[i].muted = !muted;
+                action = Some(HeaderAction::Mix);
+            }
+            let solo = self.tracks[i].solo;
+            if ui.small_button(if solo { "S!" } else { "S " }).clicked() {
+                self.tracks[i].solo = !solo;
+                action = Some(HeaderAction::Mix);
+            }
+            let fx = self.tracks[i].effects.len();
+            let plugs = self.tracks[i].plugins.len();
+            ui.label(
+                egui::RichText::new(format!("{fx} fx · {plugs} plug"))
+                    .size(9.0)
+                    .color(theme.dim),
+            );
+        });
+
+        action
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HeaderAction {
+    Select,
+    Remove,
+    Mix,
+    OpenFx,
+    OpenPiano,
+}
+
+impl eframe::App for LosAngelesApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let space = ctx.input(|i| i.key_pressed(egui::Key::Space));
+        if space {
+            self.set_playing(!self.playing);
+        }
+        self.poll_meter();
+
+        self.top_bar(ctx);
+        self.status_bar(ctx);
+        self.browser_panel(ctx);
+        self.bottom_panel(ctx);
+        self.timeline(ctx);
+
+        if self.dirty {
+            self.dirty = false;
+        }
+        if self.playing || self.meter > 0.01 {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([940.0, 620.0])
+            .with_title("LOSANGELES — grid-free DAW"),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "LOSANGELES",
+        options,
+        Box::new(|cc| Box::new(LosAngelesApp::new(cc))),
+    )
+}
+
+
 
