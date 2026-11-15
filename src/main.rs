@@ -147,6 +147,10 @@ struct LosAngelesApp {
     export_directory: String,
     export_task_handle: Option<std::thread::JoinHandle<Result<()>>>,
     export_status: ExportStatus,
+    lane_rect: egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(0.0, 0.0)),
+    notice: Option<String>,
+    notice_bad: bool,
+    dirty: bool,
 }
 
 impl LosAngelesApp {
