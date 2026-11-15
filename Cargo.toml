@@ -27,6 +27,11 @@ rtrb = "0.3"
 hound = "3.5"
 symphonia = { version = "0.5", features = ["wav", "ogg", "mp3", "flac", "vorbis", "pcm"] }
 
+# --- Audio file encoding (export) ---
+claxon = "0.4"      # FLAC encoding
+vorbis = "0.10"     # Vorbis encoding
+ogg = "0.10"        # Ogg container
+
 # --- Utilities ---
 anyhow = "1.0"
 
