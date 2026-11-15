@@ -25,7 +25,7 @@ rtrb = "0.3"
 
 # --- Audio file decoding (used from Stage 2 onwards) ---
 hound = "3.5"
-symphonia = { version = "0.5", features = ["wav", "ogg", "mp3", "flac", "vorbis", "pcm"] }
+symphonia = { version = "0.5", features = ["wav", "ogg", "mp3", "flac", "vorbis", "pcm", "encoder"] }
 
 # --- Utilities ---
 anyhow = "1.0"
