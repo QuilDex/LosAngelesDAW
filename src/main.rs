@@ -114,10 +114,12 @@ struct LosAngelesApp {
     clip_drag: Option<ClipDrag>,
     sound_drag: Option<SoundDrag>,
     clip_cache: Vec<(PathBuf, Arc<ClipData>)>,
-    lane_rect: egui::Rect,
-    notice: Option<String>,
-    notice_bad: bool,
-    dirty: bool,
+    show_export_dialog: bool,
+    export_format: Option<ExportFormat>,
+    export_bitrate: Option<u32>,
+    export_directory: String,
+    export_task_handle: Option<std::thread::JoinHandle<Result<()>>>,
+    export_status: ExportStatus,
 }
 
 impl LosAngelesApp {
@@ -807,18 +809,9 @@ impl LosAngelesApp {
                     ui.separator();
                     ui.add_space(6.0);
 
-                    if ui
-                        .selectable_label(self.playing, egui::RichText::new("PLAY").size(12.0))
-                        .clicked()
-                    {
-                        self.set_playing(!self.playing);
-                    }
-                    if ui
-                        .selectable_label(!self.playing, egui::RichText::new("STOP").size(12.0))
-                        .clicked()
-                    {
-                        self.set_playing(false);
-                    }
+                if ui.button("EXPORT").clicked() {
+                    self.show_export_dialog = true;
+                }
 
                     ui.add_space(4.0);
                     let tone = ui
