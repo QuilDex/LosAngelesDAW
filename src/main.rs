@@ -27,7 +27,34 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Result;
 use eframe::egui;
+
+#[derive(Clone, Copy, PartialEq)]
+enum ExportFormat {
+    Wav,
+    Flac,
+    Mp3,
+    Ogg,
+}
+
+impl ExportFormat {
+    fn ext(&self) -> &'static str {
+        match self {
+            ExportFormat::Wav => "wav",
+            ExportFormat::Flac => "flac",
+            ExportFormat::Mp3 => "mp3",
+            ExportFormat::Ogg => "ogg",
+        }
+    }
+}
+
+enum ExportStatus {
+    Idle,
+    Exporting(String),
+    Done(String),
+    Error(String),
+}
 
 use decode::ClipData;
 use engine::{AudioEngine, Command, InputEngine, MixSnapshot, PlacedNote, Shared, TrackMix};
