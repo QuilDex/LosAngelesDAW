@@ -28,9 +28,7 @@ hound = "3.5"
 symphonia = { version = "0.5", features = ["wav", "ogg", "mp3", "flac", "vorbis", "pcm"] }
 
 # --- Audio file encoding (export) ---
-claxon = "0.4"      # FLAC encoding
-vorbis = "0.11"     # Vorbis encoding
-ogg = "0.9"         # Ogg container
+flacenc = "0.2"     # Pure-Rust FLAC encoding
 
 # --- Utilities ---
 anyhow = "1.0"
